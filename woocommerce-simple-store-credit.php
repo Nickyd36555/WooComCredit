@@ -41,6 +41,8 @@ class WC_Simple_Store_Credit {
 		add_action( 'woocommerce_before_cart', array( $this, 'cart_notice' ) );
 		add_action( 'wp', array( $this, 'handle_apply_link' ) );
 		add_action( 'woocommerce_review_order_before_payment', array( $this, 'checkout_apply_field' ) );
+		add_action( 'woocommerce_review_order_before_order_total', array( $this, 'review_order_credit_row' ) );
+		add_filter( 'woocommerce_form_field_checkbox', array( $this, 'strip_optional_suffix' ), 10, 2 );
 		add_action( 'woocommerce_checkout_update_order_review', array( $this, 'checkout_update_session' ) );
 		add_action( 'woocommerce_cart_calculate_fees', array( $this, 'apply_credit_fee' ) );
 		add_action( 'woocommerce_after_checkout_validation', array( $this, 'validate_credit_at_checkout' ), 10, 2 );
@@ -237,6 +239,23 @@ class WC_Simple_Store_Credit {
 	}
 
 	public function checkout_apply_field() {
+		$this->render_apply_checkbox( 'wcsc_apply_credit' );
+	}
+
+	/**
+	 * Second copy of the checkbox inside the order summary, just above the
+	 * Total row (below where themes place the coupon field).
+	 */
+	public function review_order_credit_row() {
+		if ( ! is_user_logged_in() || $this->get_balance( get_current_user_id() ) <= 0 ) {
+			return;
+		}
+		echo '<tr class="wcsc-credit-row"><td colspan="2" style="text-align:left;">';
+		$this->render_apply_checkbox( 'wcsc_apply_credit_totals' );
+		echo '</td></tr>';
+	}
+
+	private function render_apply_checkbox( $field_id ) {
 		if ( ! is_user_logged_in() ) {
 			return;
 		}
@@ -244,28 +263,48 @@ class WC_Simple_Store_Credit {
 		if ( $balance <= 0 ) {
 			return;
 		}
+
 		// Standard WooCommerce field markup so checkout themes/skins style it
 		// like every other checkout field.
 		woocommerce_form_field(
 			'wcsc_apply_credit',
 			array(
 				'type'   => 'checkbox',
+				'id'     => $field_id,
 				'class'  => array( 'form-row-wide', 'wcsc-apply-credit', 'update_totals_on_change' ),
-				'label'  => sprintf(
+				'label'  => '<strong>' . sprintf(
 					/* translators: %s: available credit amount */
 					esc_html__( 'Use my store credit (%s available)', 'wc-simple-store-credit' ),
-					wp_kses_post( wc_price( $balance ) )
-				),
+					'&#9733; ' . wp_kses_post( wc_price( $balance ) ) . ' &#9733;'
+				) . '</strong>',
 				'return' => false,
 			),
 			$this->is_credit_applied() ? 1 : ''
 		);
 
-		wc_enqueue_js(
-			"$( document.body ).on( 'change', 'input[name=\"wcsc_apply_credit\"]', function() {
-				$( document.body ).trigger( 'update_checkout' );
-			} );"
-		);
+		// Both copies share one name; keep them visually in sync and refresh
+		// the totals whenever either one changes. Enqueue once.
+		static $js_added = false;
+		if ( ! $js_added ) {
+			$js_added = true;
+			wc_enqueue_js(
+				"$( document.body ).on( 'change', 'input[name=\"wcsc_apply_credit\"]', function() {
+					$( 'input[name=\"wcsc_apply_credit\"]' ).prop( 'checked', $( this ).prop( 'checked' ) );
+					$( document.body ).trigger( 'update_checkout' );
+				} );"
+			);
+		}
+	}
+
+	/**
+	 * Hide the "(optional)" suffix WooCommerce appends to non-required fields
+	 * — it reads oddly on the store credit checkbox.
+	 */
+	public function strip_optional_suffix( $field, $key ) {
+		if ( 'wcsc_apply_credit' === $key ) {
+			$field = preg_replace( '/&nbsp;<span class="optional">.*?<\/span>/', '', $field );
+		}
+		return $field;
 	}
 
 	public function checkout_update_session( $post_data ) {
