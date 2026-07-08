@@ -13,8 +13,9 @@ it to any order at checkout — right away or whenever they feel like it.
   customer sees in their history, and a list of every customer holding credit.
 - **Redeem at checkout** — customers tick "Use my store credit" at checkout
   (or use the Apply link on the cart page). The credit is added as a discount
-  line on the order, capped at the item total so it can never make the order
-  total negative.
+  line on the order and can cover the entire order — items, shipping, taxes,
+  and other charges — capped at the order cost so the total never goes
+  negative.
 - **Automatic bookkeeping** — credit is deducted when the order is placed and
   automatically returned to the customer if the order is cancelled, fails, or
   is fully refunded.

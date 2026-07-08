@@ -44,7 +44,9 @@ class WC_Simple_Store_Credit {
 		add_action( 'woocommerce_review_order_before_order_total', array( $this, 'review_order_credit_row' ) );
 		add_filter( 'woocommerce_form_field_checkbox', array( $this, 'strip_optional_suffix' ), 10, 2 );
 		add_action( 'woocommerce_checkout_update_order_review', array( $this, 'checkout_update_session' ) );
-		add_action( 'woocommerce_cart_calculate_fees', array( $this, 'apply_credit_fee' ) );
+		// Late priority so other plugins' fees (e.g. package protection) are
+		// already in the cart and get covered by the credit too.
+		add_action( 'woocommerce_cart_calculate_fees', array( $this, 'apply_credit_fee' ), 999 );
 		add_action( 'woocommerce_after_checkout_validation', array( $this, 'validate_credit_at_checkout' ), 10, 2 );
 
 		// Deduct credit when the order is placed; restore it if the order dies.
@@ -327,8 +329,16 @@ class WC_Simple_Store_Credit {
 			return;
 		}
 
-		// Cap the credit at the cost of the items (incl. tax) so it can never push the total negative.
-		$cap    = (float) $cart->get_cart_contents_total() + (float) $cart->get_cart_contents_tax();
+		// Cap the credit at the full order cost — items, shipping, and any
+		// other charges (all incl. tax) — so it can never push the total
+		// negative but can cover the whole order.
+		$cap = (float) $cart->get_cart_contents_total() + (float) $cart->get_cart_contents_tax();
+		$cap += (float) $cart->get_shipping_total() + (float) $cart->get_shipping_tax();
+		foreach ( $cart->get_fees() as $fee ) {
+			if ( $fee->name !== $this->fee_name() && (float) $fee->amount > 0 ) {
+				$cap += (float) $fee->amount + (float) $fee->tax;
+			}
+		}
 		$credit = min( $balance, max( 0, $cap ) );
 
 		if ( $credit > 0 ) {
