@@ -244,21 +244,28 @@ class WC_Simple_Store_Credit {
 		if ( $balance <= 0 ) {
 			return;
 		}
-		?>
-		<div class="wcsc-apply-credit" style="border:1px solid #e0e0e0;border-radius:4px;padding:.75em 1em;margin-bottom:1em;">
-			<label style="display:block;margin:0;cursor:pointer;">
-				<input type="checkbox" name="wcsc_apply_credit" value="1" <?php checked( $this->is_credit_applied() ); ?>
-					onchange="jQuery('body').trigger('update_checkout');" />
-				<?php
-				printf(
+		// Standard WooCommerce field markup so checkout themes/skins style it
+		// like every other checkout field.
+		woocommerce_form_field(
+			'wcsc_apply_credit',
+			array(
+				'type'   => 'checkbox',
+				'class'  => array( 'form-row-wide', 'wcsc-apply-credit', 'update_totals_on_change' ),
+				'label'  => sprintf(
 					/* translators: %s: available credit amount */
 					esc_html__( 'Use my store credit (%s available)', 'wc-simple-store-credit' ),
 					wp_kses_post( wc_price( $balance ) )
-				);
-				?>
-			</label>
-		</div>
-		<?php
+				),
+				'return' => false,
+			),
+			$this->is_credit_applied() ? 1 : ''
+		);
+
+		wc_enqueue_js(
+			"$( document.body ).on( 'change', 'input[name=\"wcsc_apply_credit\"]', function() {
+				$( document.body ).trigger( 'update_checkout' );
+			} );"
+		);
 	}
 
 	public function checkout_update_session( $post_data ) {
