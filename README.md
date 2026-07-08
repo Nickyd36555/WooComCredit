@@ -1,0 +1,41 @@
+# Simple Store Credit for WooCommerce
+
+A tiny, single-file WooCommerce plugin for gifting store credit to customers.
+Customers see their balance under **My Account → Store Credit** and can apply
+it to any order at checkout — right away or whenever they feel like it.
+
+## Features
+
+- **Store Credit tab in My Account** (placed right after Orders) showing the
+  current balance and a full credit history (gifts, spends, refunds).
+- **Gift/adjust credit from the admin** — a *WooCommerce → Store Credit* page
+  with a customer search box, add/deduct actions, an optional note that the
+  customer sees in their history, and a list of every customer holding credit.
+- **Redeem at checkout** — customers tick "Use my store credit" at checkout
+  (or use the Apply link on the cart page). The credit is added as a discount
+  line on the order, capped at the item total so it can never make the order
+  total negative.
+- **Automatic bookkeeping** — credit is deducted when the order is placed and
+  automatically returned to the customer if the order is cancelled, fails, or
+  is fully refunded.
+- HPOS (High-Performance Order Storage) compatible.
+
+## Installation
+
+1. Copy the `woocommerce-simple-store-credit.php` file into
+   `wp-content/plugins/woocommerce-simple-store-credit/` on your site
+   (or zip the folder and upload it via **Plugins → Add New → Upload Plugin**).
+2. Activate **Simple Store Credit for WooCommerce** on the Plugins screen.
+3. Go to **WooCommerce → Store Credit**, search for a customer, enter an
+   amount, and click **Update credit**.
+
+> **Note:** the checkout checkbox is built for the classic checkout
+> (`[woocommerce_checkout]` shortcode). If your theme uses the block-based
+> checkout, customers can still apply their credit from the cart page.
+
+## How credit is stored
+
+Balances and history are stored as user meta (`_wcsc_credit_balance` and
+`_wcsc_credit_log`), and each order that spends credit records the amount in
+its own meta (`_wcsc_credit_used`) so refunds/cancellations can return it.
+No custom database tables are created.

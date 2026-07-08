@@ -1,0 +1,566 @@
+<?php
+/**
+ * Plugin Name: Simple Store Credit for WooCommerce
+ * Description: Gift store credit to customers. Customers see their balance under My Account → Store Credit and can apply it at checkout whenever they like.
+ * Version: 1.0.0
+ * Author: WooComCredit
+ * Text Domain: wc-simple-store-credit
+ * Requires at least: 6.0
+ * Requires PHP: 7.4
+ * Requires Plugins: woocommerce
+ * License: GPL-2.0+
+ */
+
+defined( 'ABSPATH' ) || exit;
+
+class WC_Simple_Store_Credit {
+
+	const META_BALANCE = '_wcsc_credit_balance';
+	const META_LOG     = '_wcsc_credit_log';
+	const ENDPOINT     = 'store-credit';
+	const SESSION_KEY  = 'wcsc_apply_credit';
+
+	/** @var WC_Simple_Store_Credit */
+	private static $instance;
+
+	public static function instance() {
+		if ( ! self::$instance ) {
+			self::$instance = new self();
+		}
+		return self::$instance;
+	}
+
+	private function __construct() {
+		// My Account tab.
+		add_filter( 'woocommerce_get_query_vars', array( $this, 'register_query_var' ) );
+		add_filter( 'woocommerce_account_menu_items', array( $this, 'account_menu_item' ) );
+		add_filter( 'woocommerce_endpoint_' . self::ENDPOINT . '_title', array( $this, 'endpoint_title' ) );
+		add_action( 'woocommerce_account_' . self::ENDPOINT . '_endpoint', array( $this, 'endpoint_content' ) );
+
+		// Applying credit on cart/checkout.
+		add_action( 'woocommerce_before_cart', array( $this, 'cart_notice' ) );
+		add_action( 'wp', array( $this, 'handle_apply_link' ) );
+		add_action( 'woocommerce_review_order_before_payment', array( $this, 'checkout_apply_field' ) );
+		add_action( 'woocommerce_checkout_update_order_review', array( $this, 'checkout_update_session' ) );
+		add_action( 'woocommerce_cart_calculate_fees', array( $this, 'apply_credit_fee' ) );
+
+		// Deduct credit when the order is placed; restore it if the order dies.
+		add_action( 'woocommerce_checkout_order_processed', array( $this, 'deduct_credit_for_order' ), 10, 1 );
+		add_action( 'woocommerce_store_api_checkout_order_processed', array( $this, 'deduct_credit_for_order' ), 10, 1 );
+		add_action( 'woocommerce_order_status_cancelled', array( $this, 'restore_credit_for_order' ) );
+		add_action( 'woocommerce_order_status_failed', array( $this, 'restore_credit_for_order' ) );
+		add_action( 'woocommerce_order_status_refunded', array( $this, 'restore_credit_for_order' ) );
+
+		// Admin.
+		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
+		add_filter( 'woocommerce_screen_ids', array( $this, 'admin_screen_ids' ) );
+	}
+
+	/* -------------------------------------------------------------------------
+	 * Balance API
+	 * ---------------------------------------------------------------------- */
+
+	public function get_balance( $user_id ) {
+		return max( 0, (float) get_user_meta( $user_id, self::META_BALANCE, true ) );
+	}
+
+	/**
+	 * Adjust a customer's balance by $amount (negative to deduct) and log it.
+	 * The balance never drops below zero. Returns the new balance.
+	 */
+	public function adjust_balance( $user_id, $amount, $note = '' ) {
+		$decimals = wc_get_price_decimals();
+		$balance  = $this->get_balance( $user_id );
+		$new      = max( 0, round( $balance + (float) $amount, $decimals ) );
+
+		update_user_meta( $user_id, self::META_BALANCE, $new );
+
+		$log = get_user_meta( $user_id, self::META_LOG, true );
+		if ( ! is_array( $log ) ) {
+			$log = array();
+		}
+		$log[] = array(
+			'time'    => time(),
+			'amount'  => round( $new - $balance, $decimals ),
+			'balance' => $new,
+			'note'    => $note,
+		);
+		update_user_meta( $user_id, self::META_LOG, array_slice( $log, -100 ) );
+
+		return $new;
+	}
+
+	public function get_log( $user_id ) {
+		$log = get_user_meta( $user_id, self::META_LOG, true );
+		return is_array( $log ) ? array_reverse( $log ) : array();
+	}
+
+	private function fee_name() {
+		return __( 'Store credit', 'wc-simple-store-credit' );
+	}
+
+	private function is_credit_applied() {
+		return WC()->session && 'yes' === WC()->session->get( self::SESSION_KEY );
+	}
+
+	private function set_credit_applied( $applied ) {
+		if ( WC()->session ) {
+			WC()->session->set( self::SESSION_KEY, $applied ? 'yes' : 'no' );
+		}
+	}
+
+	/* -------------------------------------------------------------------------
+	 * My Account → Store Credit
+	 * ---------------------------------------------------------------------- */
+
+	public function register_query_var( $vars ) {
+		$vars[ self::ENDPOINT ] = self::ENDPOINT;
+		return $vars;
+	}
+
+	public function endpoint_title() {
+		return __( 'Store Credit', 'wc-simple-store-credit' );
+	}
+
+	public function account_menu_item( $items ) {
+		$new = array();
+		foreach ( $items as $key => $label ) {
+			$new[ $key ] = $label;
+			if ( 'orders' === $key ) {
+				$new[ self::ENDPOINT ] = __( 'Store Credit', 'wc-simple-store-credit' );
+			}
+		}
+		if ( ! isset( $new[ self::ENDPOINT ] ) ) {
+			$new[ self::ENDPOINT ] = __( 'Store Credit', 'wc-simple-store-credit' );
+		}
+		return $new;
+	}
+
+	public function endpoint_content() {
+		$user_id = get_current_user_id();
+		$balance = $this->get_balance( $user_id );
+		$log     = $this->get_log( $user_id );
+		?>
+		<div class="wcsc-balance" style="border:1px solid #e0e0e0;border-radius:4px;padding:1.25em 1.5em;margin-bottom:1.5em;">
+			<p style="margin:0 0 .25em;"><?php esc_html_e( 'Your store credit balance', 'wc-simple-store-credit' ); ?></p>
+			<p style="margin:0;font-size:2em;font-weight:700;"><?php echo wp_kses_post( wc_price( $balance ) ); ?></p>
+			<?php if ( $balance > 0 ) : ?>
+				<p style="margin:.75em 0 0;">
+					<?php esc_html_e( 'You can apply your credit to any order at checkout — use it now or save it for later.', 'wc-simple-store-credit' ); ?>
+				</p>
+			<?php endif; ?>
+		</div>
+		<?php
+		if ( empty( $log ) ) {
+			echo '<p>' . esc_html__( 'No store credit activity yet.', 'wc-simple-store-credit' ) . '</p>';
+			return;
+		}
+		?>
+		<h3><?php esc_html_e( 'Credit history', 'wc-simple-store-credit' ); ?></h3>
+		<table class="woocommerce-table shop_table shop_table_responsive">
+			<thead>
+				<tr>
+					<th><?php esc_html_e( 'Date', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Details', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Amount', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Balance', 'wc-simple-store-credit' ); ?></th>
+				</tr>
+			</thead>
+			<tbody>
+				<?php foreach ( $log as $entry ) : ?>
+					<tr>
+						<td data-title="<?php esc_attr_e( 'Date', 'wc-simple-store-credit' ); ?>">
+							<?php echo esc_html( wp_date( get_option( 'date_format' ), $entry['time'] ) ); ?>
+						</td>
+						<td data-title="<?php esc_attr_e( 'Details', 'wc-simple-store-credit' ); ?>">
+							<?php echo esc_html( $entry['note'] ); ?>
+						</td>
+						<td data-title="<?php esc_attr_e( 'Amount', 'wc-simple-store-credit' ); ?>" style="color:<?php echo $entry['amount'] >= 0 ? '#1a7f37' : '#c0392b'; ?>;">
+							<?php echo wp_kses_post( ( $entry['amount'] >= 0 ? '+' : '−' ) . wc_price( abs( $entry['amount'] ) ) ); ?>
+						</td>
+						<td data-title="<?php esc_attr_e( 'Balance', 'wc-simple-store-credit' ); ?>">
+							<?php echo wp_kses_post( wc_price( $entry['balance'] ) ); ?>
+						</td>
+					</tr>
+				<?php endforeach; ?>
+			</tbody>
+		</table>
+		<?php
+	}
+
+	/* -------------------------------------------------------------------------
+	 * Cart & checkout
+	 * ---------------------------------------------------------------------- */
+
+	public function cart_notice() {
+		if ( ! is_user_logged_in() ) {
+			return;
+		}
+		$balance = $this->get_balance( get_current_user_id() );
+		if ( $balance <= 0 ) {
+			return;
+		}
+
+		if ( $this->is_credit_applied() ) {
+			$url     = wp_nonce_url( add_query_arg( 'wcsc_credit', '0', wc_get_cart_url() ), 'wcsc_credit' );
+			$message = sprintf(
+				/* translators: 1: credit amount, 2: remove link */
+				__( 'Your store credit of %1$s is applied to this order. %2$s', 'wc-simple-store-credit' ),
+				wc_price( $balance ),
+				'<a href="' . esc_url( $url ) . '">' . esc_html__( 'Remove it', 'wc-simple-store-credit' ) . '</a>'
+			);
+		} else {
+			$url     = wp_nonce_url( add_query_arg( 'wcsc_credit', '1', wc_get_cart_url() ), 'wcsc_credit' );
+			$message = sprintf(
+				/* translators: 1: credit amount, 2: apply link */
+				__( 'You have %1$s in store credit. %2$s', 'wc-simple-store-credit' ),
+				wc_price( $balance ),
+				'<a href="' . esc_url( $url ) . '">' . esc_html__( 'Apply it to this order', 'wc-simple-store-credit' ) . '</a>'
+			);
+		}
+
+		wc_print_notice( $message, 'notice' );
+	}
+
+	public function handle_apply_link() {
+		if ( ! isset( $_GET['wcsc_credit'], $_GET['_wpnonce'] ) || ! is_user_logged_in() ) {
+			return;
+		}
+		if ( ! wp_verify_nonce( sanitize_key( wp_unslash( $_GET['_wpnonce'] ) ), 'wcsc_credit' ) ) {
+			return;
+		}
+		$this->set_credit_applied( '1' === $_GET['wcsc_credit'] );
+		wp_safe_redirect( remove_query_arg( array( 'wcsc_credit', '_wpnonce' ) ) );
+		exit;
+	}
+
+	public function checkout_apply_field() {
+		if ( ! is_user_logged_in() ) {
+			return;
+		}
+		$balance = $this->get_balance( get_current_user_id() );
+		if ( $balance <= 0 ) {
+			return;
+		}
+		?>
+		<div class="wcsc-apply-credit" style="border:1px solid #e0e0e0;border-radius:4px;padding:.75em 1em;margin-bottom:1em;">
+			<label style="display:block;margin:0;cursor:pointer;">
+				<input type="checkbox" name="wcsc_apply_credit" value="1" <?php checked( $this->is_credit_applied() ); ?>
+					onchange="jQuery('body').trigger('update_checkout');" />
+				<?php
+				printf(
+					/* translators: %s: available credit amount */
+					esc_html__( 'Use my store credit (%s available)', 'wc-simple-store-credit' ),
+					wp_kses_post( wc_price( $balance ) )
+				);
+				?>
+			</label>
+		</div>
+		<?php
+	}
+
+	public function checkout_update_session( $post_data ) {
+		if ( ! is_user_logged_in() ) {
+			return;
+		}
+		parse_str( (string) $post_data, $data );
+		$this->set_credit_applied( ! empty( $data['wcsc_apply_credit'] ) );
+	}
+
+	public function apply_credit_fee( $cart ) {
+		if ( is_admin() && ! defined( 'DOING_AJAX' ) ) {
+			return;
+		}
+		if ( ! is_user_logged_in() || ! $this->is_credit_applied() ) {
+			return;
+		}
+		$balance = $this->get_balance( get_current_user_id() );
+		if ( $balance <= 0 ) {
+			return;
+		}
+
+		// Cap the credit at the cost of the items (incl. tax) so it can never push the total negative.
+		$cap    = (float) $cart->get_cart_contents_total() + (float) $cart->get_cart_contents_tax();
+		$credit = min( $balance, max( 0, $cap ) );
+
+		if ( $credit > 0 ) {
+			$cart->add_fee( $this->fee_name(), -$credit, false );
+		}
+	}
+
+	/* -------------------------------------------------------------------------
+	 * Order lifecycle
+	 * ---------------------------------------------------------------------- */
+
+	public function deduct_credit_for_order( $order ) {
+		if ( ! $order instanceof WC_Order ) {
+			$order = wc_get_order( $order );
+		}
+		if ( ! $order || $order->get_meta( '_wcsc_credit_used' ) ) {
+			return;
+		}
+		$user_id = $order->get_user_id();
+		if ( ! $user_id ) {
+			return;
+		}
+
+		$used = 0;
+		foreach ( $order->get_fees() as $fee ) {
+			if ( $fee->get_name() === $this->fee_name() && (float) $fee->get_total() < 0 ) {
+				$used += abs( (float) $fee->get_total() + (float) $fee->get_total_tax() );
+			}
+		}
+		if ( $used <= 0 ) {
+			return;
+		}
+
+		$this->adjust_balance(
+			$user_id,
+			-$used,
+			sprintf(
+				/* translators: %s: order number */
+				__( 'Used on order #%s', 'wc-simple-store-credit' ),
+				$order->get_order_number()
+			)
+		);
+
+		$order->update_meta_data( '_wcsc_credit_used', wc_format_decimal( $used ) );
+		$order->save();
+
+		$this->set_credit_applied( false );
+	}
+
+	public function restore_credit_for_order( $order_id ) {
+		$order = wc_get_order( $order_id );
+		if ( ! $order ) {
+			return;
+		}
+		$used = (float) $order->get_meta( '_wcsc_credit_used' );
+		if ( $used <= 0 || $order->get_meta( '_wcsc_credit_restored' ) ) {
+			return;
+		}
+		$user_id = $order->get_user_id();
+		if ( ! $user_id ) {
+			return;
+		}
+
+		$this->adjust_balance(
+			$user_id,
+			$used,
+			sprintf(
+				/* translators: %s: order number */
+				__( 'Credit returned from order #%s', 'wc-simple-store-credit' ),
+				$order->get_order_number()
+			)
+		);
+
+		$order->update_meta_data( '_wcsc_credit_restored', 'yes' );
+		$order->save();
+	}
+
+	/* -------------------------------------------------------------------------
+	 * Admin: WooCommerce → Store Credit
+	 * ---------------------------------------------------------------------- */
+
+	public function admin_menu() {
+		add_submenu_page(
+			'woocommerce',
+			__( 'Store Credit', 'wc-simple-store-credit' ),
+			__( 'Store Credit', 'wc-simple-store-credit' ),
+			'manage_woocommerce',
+			'wcsc-store-credit',
+			array( $this, 'admin_page' )
+		);
+	}
+
+	/**
+	 * Register our admin page as a WooCommerce screen so WC loads its
+	 * enhanced-select (customer search) scripts on it.
+	 */
+	public function admin_screen_ids( $ids ) {
+		$ids[] = 'woocommerce_page_wcsc-store-credit';
+		return $ids;
+	}
+
+	public function admin_page() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return;
+		}
+
+		$notice = $this->maybe_handle_admin_post();
+		?>
+		<div class="wrap">
+			<h1><?php esc_html_e( 'Store Credit', 'wc-simple-store-credit' ); ?></h1>
+			<?php if ( $notice ) : ?>
+				<div class="notice notice-<?php echo esc_attr( $notice['type'] ); ?> is-dismissible"><p><?php echo wp_kses_post( $notice['message'] ); ?></p></div>
+			<?php endif; ?>
+
+			<h2><?php esc_html_e( 'Gift or adjust credit', 'wc-simple-store-credit' ); ?></h2>
+			<form method="post">
+				<?php wp_nonce_field( 'wcsc_adjust_credit' ); ?>
+				<table class="form-table">
+					<tr>
+						<th scope="row"><label for="wcsc_user"><?php esc_html_e( 'Customer', 'wc-simple-store-credit' ); ?></label></th>
+						<td>
+							<select id="wcsc_user" name="wcsc_user" class="wc-customer-search" style="min-width:300px;"
+								data-placeholder="<?php esc_attr_e( 'Search for a customer…', 'wc-simple-store-credit' ); ?>" data-allow_clear="true"></select>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="wcsc_action"><?php esc_html_e( 'Action', 'wc-simple-store-credit' ); ?></label></th>
+						<td>
+							<select id="wcsc_action" name="wcsc_action">
+								<option value="add"><?php esc_html_e( 'Add credit', 'wc-simple-store-credit' ); ?></option>
+								<option value="deduct"><?php esc_html_e( 'Deduct credit', 'wc-simple-store-credit' ); ?></option>
+							</select>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="wcsc_amount"><?php esc_html_e( 'Amount', 'wc-simple-store-credit' ); ?> (<?php echo esc_html( get_woocommerce_currency_symbol() ); ?>)</label></th>
+						<td><input type="number" step="0.01" min="0.01" id="wcsc_amount" name="wcsc_amount" style="width:120px;" required /></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="wcsc_note"><?php esc_html_e( 'Note (shown to customer)', 'wc-simple-store-credit' ); ?></label></th>
+						<td><input type="text" id="wcsc_note" name="wcsc_note" class="regular-text" placeholder="<?php esc_attr_e( 'e.g. Thanks for your loyalty!', 'wc-simple-store-credit' ); ?>" /></td>
+					</tr>
+				</table>
+				<?php submit_button( __( 'Update credit', 'wc-simple-store-credit' ) ); ?>
+			</form>
+
+			<h2><?php esc_html_e( 'Customers with credit', 'wc-simple-store-credit' ); ?></h2>
+			<?php $this->admin_balances_table(); ?>
+		</div>
+		<?php
+	}
+
+	private function maybe_handle_admin_post() {
+		if ( 'POST' !== ( $_SERVER['REQUEST_METHOD'] ?? '' ) || ! isset( $_POST['wcsc_amount'] ) ) {
+			return null;
+		}
+		check_admin_referer( 'wcsc_adjust_credit' );
+
+		$user_id = isset( $_POST['wcsc_user'] ) ? absint( $_POST['wcsc_user'] ) : 0;
+		$user    = $user_id ? get_userdata( $user_id ) : false;
+		if ( ! $user ) {
+			return array(
+				'type'    => 'error',
+				'message' => __( 'Please choose a customer.', 'wc-simple-store-credit' ),
+			);
+		}
+
+		$amount = isset( $_POST['wcsc_amount'] ) ? (float) wc_format_decimal( wp_unslash( $_POST['wcsc_amount'] ) ) : 0;
+		if ( $amount <= 0 ) {
+			return array(
+				'type'    => 'error',
+				'message' => __( 'Please enter an amount greater than zero.', 'wc-simple-store-credit' ),
+			);
+		}
+
+		$deduct = isset( $_POST['wcsc_action'] ) && 'deduct' === $_POST['wcsc_action'];
+		$note   = isset( $_POST['wcsc_note'] ) ? sanitize_text_field( wp_unslash( $_POST['wcsc_note'] ) ) : '';
+		if ( '' === $note ) {
+			$note = $deduct
+				? __( 'Credit adjusted by the store', 'wc-simple-store-credit' )
+				: __( 'Credit gifted by the store', 'wc-simple-store-credit' );
+		}
+
+		$new = $this->adjust_balance( $user_id, $deduct ? -$amount : $amount, $note );
+
+		return array(
+			'type'    => 'success',
+			'message' => sprintf(
+				/* translators: 1: customer name, 2: new balance */
+				__( 'Done! %1$s now has a store credit balance of %2$s.', 'wc-simple-store-credit' ),
+				esc_html( $user->display_name ),
+				wc_price( $new )
+			),
+		);
+	}
+
+	private function admin_balances_table() {
+		$users = get_users(
+			array(
+				'meta_query' => array(
+					array(
+						'key'     => self::META_BALANCE,
+						'value'   => 0,
+						'compare' => '>',
+						'type'    => 'DECIMAL(20,4)',
+					),
+				),
+				'number'     => 200,
+				'orderby'    => 'display_name',
+			)
+		);
+
+		if ( empty( $users ) ) {
+			echo '<p>' . esc_html__( 'No customers have store credit yet.', 'wc-simple-store-credit' ) . '</p>';
+			return;
+		}
+		?>
+		<table class="widefat striped" style="max-width:700px;">
+			<thead>
+				<tr>
+					<th><?php esc_html_e( 'Customer', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Email', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Balance', 'wc-simple-store-credit' ); ?></th>
+				</tr>
+			</thead>
+			<tbody>
+				<?php foreach ( $users as $user ) : ?>
+					<tr>
+						<td><a href="<?php echo esc_url( get_edit_user_link( $user->ID ) ); ?>"><?php echo esc_html( $user->display_name ); ?></a></td>
+						<td><?php echo esc_html( $user->user_email ); ?></td>
+						<td><?php echo wp_kses_post( wc_price( $this->get_balance( $user->ID ) ) ); ?></td>
+					</tr>
+				<?php endforeach; ?>
+			</tbody>
+		</table>
+		<?php
+	}
+}
+
+/* ---------------------------------------------------------------------------
+ * Bootstrap
+ * ------------------------------------------------------------------------ */
+
+add_action(
+	'plugins_loaded',
+	function () {
+		if ( class_exists( 'WooCommerce' ) ) {
+			WC_Simple_Store_Credit::instance();
+		} else {
+			add_action(
+				'admin_notices',
+				function () {
+					echo '<div class="notice notice-error"><p>' .
+						esc_html__( 'Simple Store Credit for WooCommerce requires WooCommerce to be installed and active.', 'wc-simple-store-credit' ) .
+						'</p></div>';
+				}
+			);
+		}
+	}
+);
+
+// Declare HPOS (custom order tables) compatibility. The checkout checkbox is
+// built for the classic [woocommerce_checkout] shortcode, so flag block-based
+// checkout as unsupported.
+add_action(
+	'before_woocommerce_init',
+	function () {
+		if ( class_exists( \Automattic\WooCommerce\Utilities\FeaturesUtil::class ) ) {
+			\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
+			\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'cart_checkout_blocks', __FILE__, false );
+		}
+	}
+);
+
+register_activation_hook(
+	__FILE__,
+	function () {
+		add_rewrite_endpoint( WC_Simple_Store_Credit::ENDPOINT, EP_ROOT | EP_PAGES );
+		flush_rewrite_rules();
+	}
+);
+
+register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
