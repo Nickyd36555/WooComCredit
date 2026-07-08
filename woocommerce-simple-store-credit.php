@@ -549,6 +549,15 @@ class WC_Simple_Store_Credit {
 						<th scope="row"><label for="wcsc_note"><?php esc_html_e( 'Note (shown to customer)', 'wc-simple-store-credit' ); ?></label></th>
 						<td><input type="text" id="wcsc_note" name="wcsc_note" class="regular-text" placeholder="<?php esc_attr_e( 'e.g. Thanks for your loyalty!', 'wc-simple-store-credit' ); ?>" /></td>
 					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Notify customer', 'wc-simple-store-credit' ); ?></th>
+						<td>
+							<label for="wcsc_notify">
+								<input type="checkbox" id="wcsc_notify" name="wcsc_notify" value="1" checked />
+								<?php esc_html_e( 'Email the customer about this credit (only sent when adding credit)', 'wc-simple-store-credit' ); ?>
+							</label>
+						</td>
+					</tr>
 				</table>
 				<?php submit_button( __( 'Update credit', 'wc-simple-store-credit' ) ); ?>
 			</form>
@@ -595,6 +604,11 @@ class WC_Simple_Store_Credit {
 
 		$new = $this->adjust_balance( $user_id, $deduct ? -$amount : $amount, $note );
 
+		$emailed = false;
+		if ( ! $deduct && ! empty( $_POST['wcsc_notify'] ) ) {
+			$emailed = $this->send_gift_email( $user, $amount, $note, $new );
+		}
+
 		return array(
 			'type'    => 'success',
 			'message' => sprintf(
@@ -602,8 +616,72 @@ class WC_Simple_Store_Credit {
 				__( 'Done! %1$s now has a store credit balance of %2$s.', 'wc-simple-store-credit' ),
 				esc_html( $user->display_name ),
 				wc_price( $new )
+			) . ' ' . (
+				$emailed
+					? sprintf(
+						/* translators: %s: customer email address */
+						__( 'A notification email was sent to %s.', 'wc-simple-store-credit' ),
+						esc_html( $user->user_email )
+					)
+					: ''
 			),
 		);
+	}
+
+	/**
+	 * Notify the customer they've been gifted credit, wrapped in the store's
+	 * standard WooCommerce email template.
+	 */
+	private function send_gift_email( $user, $amount, $note, $new_balance ) {
+		$mailer     = WC()->mailer();
+		$store_name = wp_specialchars_decode( get_option( 'blogname' ), ENT_QUOTES );
+
+		$subject = sprintf(
+			/* translators: 1: credit amount, 2: store name */
+			__( 'You\'ve received %1$s in store credit at %2$s', 'wc-simple-store-credit' ),
+			html_entity_decode( wp_strip_all_tags( wc_price( $amount ) ), ENT_QUOTES, 'UTF-8' ),
+			$store_name
+		);
+
+		$heading = __( 'You\'ve got store credit!', 'wc-simple-store-credit' );
+
+		ob_start();
+		?>
+		<p><?php printf( /* translators: %s: customer first name */ esc_html__( 'Hi %s,', 'wc-simple-store-credit' ), esc_html( $user->first_name ? $user->first_name : $user->display_name ) ); ?></p>
+		<p>
+			<?php
+			printf(
+				/* translators: %s: credit amount */
+				esc_html__( 'We\'ve added %s in store credit to your account.', 'wc-simple-store-credit' ),
+				'<strong>' . wp_kses_post( wc_price( $amount ) ) . '</strong>'
+			);
+			?>
+		</p>
+		<?php if ( $note ) : ?>
+			<p><em><?php echo esc_html( $note ); ?></em></p>
+		<?php endif; ?>
+		<p>
+			<?php
+			printf(
+				/* translators: %s: new balance */
+				esc_html__( 'Your balance is now %s.', 'wc-simple-store-credit' ),
+				'<strong>' . wp_kses_post( wc_price( $new_balance ) ) . '</strong>'
+			);
+			?>
+		</p>
+		<p>
+			<?php
+			printf(
+				/* translators: %s: link to the Store Credit account page */
+				esc_html__( 'Use it on any order at checkout — now or whenever you like. You can view your balance any time under %s.', 'wc-simple-store-credit' ),
+				'<a href="' . esc_url( wc_get_account_endpoint_url( self::ENDPOINT ) ) . '">' . esc_html__( 'My Account → Store Credit', 'wc-simple-store-credit' ) . '</a>'
+			);
+			?>
+		</p>
+		<?php
+		$body = ob_get_clean();
+
+		return (bool) $mailer->send( $user->user_email, $subject, $mailer->wrap_message( $heading, $body ) );
 	}
 
 	private function admin_balances_table() {

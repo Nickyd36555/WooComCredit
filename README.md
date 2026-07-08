@@ -11,6 +11,10 @@ it to any order at checkout — right away or whenever they feel like it.
 - **Gift/adjust credit from the admin** — a *WooCommerce → Store Credit* page
   with a customer search box, add/deduct actions, an optional note that the
   customer sees in their history, and a list of every customer holding credit.
+- **Email notifications** — optionally email the customer when you gift them
+  credit (on by default), using your store's standard WooCommerce email
+  template with the amount, your note, their new balance, and a link to
+  their Store Credit page.
 - **Redeem at checkout** — customers tick "Use my store credit" at checkout
   (or use the Apply link on the cart page). The credit is added as a discount
   line on the order and can cover the entire order — items, shipping, taxes,
