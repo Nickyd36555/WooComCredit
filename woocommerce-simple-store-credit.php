@@ -52,6 +52,7 @@ class WC_Simple_Store_Credit {
 		// Deduct credit when the order is placed; restore it if the order dies.
 		add_action( 'woocommerce_checkout_order_processed', array( $this, 'deduct_credit_for_order' ), 10, 1 );
 		add_action( 'woocommerce_store_api_checkout_order_processed', array( $this, 'deduct_credit_for_order' ), 10, 1 );
+		add_filter( 'woocommerce_payment_complete_order_status', array( $this, 'keep_flagged_orders_on_hold' ), 10, 3 );
 		add_action( 'woocommerce_order_status_cancelled', array( $this, 'restore_credit_for_order' ) );
 		add_action( 'woocommerce_order_status_failed', array( $this, 'restore_credit_for_order' ) );
 		add_action( 'woocommerce_order_status_refunded', array( $this, 'restore_credit_for_order' ) );
@@ -426,6 +427,7 @@ class WC_Simple_Store_Credit {
 		$order->update_meta_data( '_wcsc_credit_used', wc_format_decimal( $deduct ) );
 
 		if ( $overspend ) {
+			$order->update_meta_data( '_wcsc_credit_hold', 'yes' );
 			$order->update_status(
 				'on-hold',
 				sprintf(
@@ -440,6 +442,18 @@ class WC_Simple_Store_Credit {
 		$order->save();
 
 		$this->set_credit_applied( false );
+	}
+
+	/**
+	 * Zero-total orders are auto-completed by WooCommerce via
+	 * payment_complete(), which would lift the on-hold status we set on
+	 * overspent orders. Keep those flagged orders on hold.
+	 */
+	public function keep_flagged_orders_on_hold( $status, $order_id, $order ) {
+		if ( $order instanceof WC_Order && $order->get_meta( '_wcsc_credit_hold' ) ) {
+			return 'on-hold';
+		}
+		return $status;
 	}
 
 	public function restore_credit_for_order( $order_id ) {
