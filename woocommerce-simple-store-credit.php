@@ -43,6 +43,7 @@ class WC_Simple_Store_Credit {
 		add_action( 'woocommerce_review_order_before_payment', array( $this, 'checkout_apply_field' ) );
 		add_action( 'woocommerce_checkout_update_order_review', array( $this, 'checkout_update_session' ) );
 		add_action( 'woocommerce_cart_calculate_fees', array( $this, 'apply_credit_fee' ) );
+		add_action( 'woocommerce_after_checkout_validation', array( $this, 'validate_credit_at_checkout' ), 10, 2 );
 
 		// Deduct credit when the order is placed; restore it if the order dies.
 		add_action( 'woocommerce_checkout_order_processed', array( $this, 'deduct_credit_for_order' ), 10, 1 );
@@ -84,6 +85,7 @@ class WC_Simple_Store_Credit {
 			'amount'  => round( $new - $balance, $decimals ),
 			'balance' => $new,
 			'note'    => $note,
+			'by'      => get_current_user_id(), // Audit trail: who triggered the change (0 = system).
 		);
 		update_user_meta( $user_id, self::META_LOG, array_slice( $log, -100 ) );
 
@@ -288,6 +290,39 @@ class WC_Simple_Store_Credit {
 		}
 	}
 
+	/**
+	 * The applied fee amount is trusted nowhere: recheck it against the live
+	 * balance when the checkout form is submitted, so a stale cart (or a
+	 * second browser tab) can't spend credit that no longer exists.
+	 */
+	public function validate_credit_at_checkout( $data, $errors ) {
+		$applied = $this->get_cart_credit_total();
+		if ( $applied <= 0 ) {
+			return;
+		}
+		$balance = is_user_logged_in() ? $this->get_balance( get_current_user_id() ) : 0;
+		if ( $applied > $balance + 0.01 ) {
+			$this->set_credit_applied( false );
+			$errors->add(
+				'wcsc_credit',
+				__( 'Your store credit balance has changed, so it was removed from this order. Please review your total and place the order again.', 'wc-simple-store-credit' )
+			);
+		}
+	}
+
+	private function get_cart_credit_total() {
+		if ( ! WC()->cart ) {
+			return 0;
+		}
+		$total = 0;
+		foreach ( WC()->cart->get_fees() as $fee ) {
+			if ( $fee->name === $this->fee_name() && $fee->amount < 0 ) {
+				$total += abs( (float) $fee->amount + (float) $fee->tax );
+			}
+		}
+		return $total;
+	}
+
 	/* -------------------------------------------------------------------------
 	 * Order lifecycle
 	 * ---------------------------------------------------------------------- */
@@ -314,17 +349,38 @@ class WC_Simple_Store_Credit {
 			return;
 		}
 
-		$this->adjust_balance(
-			$user_id,
-			-$used,
-			sprintf(
-				/* translators: %s: order number */
-				__( 'Used on order #%s', 'wc-simple-store-credit' ),
-				$order->get_order_number()
-			)
-		);
+		// Backstop against double-spends: never deduct more than the live
+		// balance, and hold any order whose discount exceeds it.
+		$balance   = $this->get_balance( $user_id );
+		$overspend = $used > $balance + 0.01;
+		$deduct    = min( $used, $balance );
 
-		$order->update_meta_data( '_wcsc_credit_used', wc_format_decimal( $used ) );
+		if ( $deduct > 0 ) {
+			$this->adjust_balance(
+				$user_id,
+				-$deduct,
+				sprintf(
+					/* translators: %s: order number */
+					__( 'Used on order #%s', 'wc-simple-store-credit' ),
+					$order->get_order_number()
+				)
+			);
+		}
+
+		$order->update_meta_data( '_wcsc_credit_used', wc_format_decimal( $deduct ) );
+
+		if ( $overspend ) {
+			$order->update_status(
+				'on-hold',
+				sprintf(
+					/* translators: 1: discount taken, 2: balance available */
+					__( 'Store credit review needed: this order took a %1$s credit discount but the customer only had %2$s available. Placed on hold.', 'wc-simple-store-credit' ),
+					wc_price( $used, array( 'currency' => $order->get_currency() ) ),
+					wc_price( $balance, array( 'currency' => $order->get_currency() ) )
+				)
+			);
+		}
+
 		$order->save();
 
 		$this->set_credit_applied( false );
@@ -435,6 +491,9 @@ class WC_Simple_Store_Credit {
 
 	private function maybe_handle_admin_post() {
 		if ( 'POST' !== ( $_SERVER['REQUEST_METHOD'] ?? '' ) || ! isset( $_POST['wcsc_amount'] ) ) {
+			return null;
+		}
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
 			return null;
 		}
 		check_admin_referer( 'wcsc_adjust_credit' );
