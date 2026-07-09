@@ -517,6 +517,9 @@ class WC_Simple_Store_Credit {
 		if ( ! $notice ) {
 			$notice = $this->maybe_handle_template_post();
 		}
+		if ( ! $notice ) {
+			$notice = $this->maybe_handle_guest_account_post();
+		}
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Store Credit', 'wc-simple-store-credit' ); ?></h1>
@@ -563,6 +566,22 @@ class WC_Simple_Store_Credit {
 					</tr>
 				</table>
 				<?php submit_button( __( 'Update credit', 'wc-simple-store-credit' ) ); ?>
+			</form>
+
+			<hr style="margin:2em 0;" />
+			<h2><?php esc_html_e( 'Create account from a guest order', 'wc-simple-store-credit' ); ?></h2>
+			<p>
+				<?php esc_html_e( 'Guests can\'t hold store credit. Enter a guest order number to create a customer account from its billing details — the customer is emailed a link to set their password, and all their past guest orders are linked to the new account. Then you can gift them credit above.', 'wc-simple-store-credit' ); ?>
+			</p>
+			<form method="post">
+				<?php wp_nonce_field( 'wcsc_guest_account' ); ?>
+				<table class="form-table">
+					<tr>
+						<th scope="row"><label for="wcsc_order_id"><?php esc_html_e( 'Order number', 'wc-simple-store-credit' ); ?></label></th>
+						<td><input type="number" min="1" id="wcsc_order_id" name="wcsc_order_id" style="width:120px;" required /></td>
+					</tr>
+				</table>
+				<?php submit_button( __( 'Create account', 'wc-simple-store-credit' ), 'secondary', 'wcsc_create_account' ); ?>
 			</form>
 
 			<h2><?php esc_html_e( 'Customers with credit', 'wc-simple-store-credit' ); ?></h2>
@@ -739,6 +758,113 @@ class WC_Simple_Store_Credit {
 		$body = wpautop( trim( $body ) );
 
 		return (bool) $mailer->send( $user->user_email, $subject, $mailer->wrap_message( $template['heading'], $body ) );
+	}
+
+	private function maybe_handle_guest_account_post() {
+		if ( 'POST' !== ( $_SERVER['REQUEST_METHOD'] ?? '' ) || ! isset( $_POST['wcsc_create_account'] ) ) {
+			return null;
+		}
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return null;
+		}
+		check_admin_referer( 'wcsc_guest_account' );
+
+		$order_id = isset( $_POST['wcsc_order_id'] ) ? absint( $_POST['wcsc_order_id'] ) : 0;
+		$order    = $order_id ? wc_get_order( $order_id ) : false;
+		if ( ! $order ) {
+			return array(
+				'type'    => 'error',
+				/* translators: %d: order id */
+				'message' => sprintf( __( 'Order #%d was not found.', 'wc-simple-store-credit' ), $order_id ),
+			);
+		}
+
+		if ( $order->get_user_id() ) {
+			$user = get_userdata( $order->get_user_id() );
+			return array(
+				'type'    => 'error',
+				'message' => sprintf(
+					/* translators: 1: order number, 2: customer name */
+					__( 'Order #%1$s already belongs to the account of %2$s — you can gift them credit above.', 'wc-simple-store-credit' ),
+					$order->get_order_number(),
+					esc_html( $user ? $user->display_name : '' )
+				),
+			);
+		}
+
+		$email = sanitize_email( $order->get_billing_email() );
+		if ( ! $email ) {
+			return array(
+				'type'    => 'error',
+				'message' => __( 'That order has no billing email address, so no account can be created.', 'wc-simple-store-credit' ),
+			);
+		}
+
+		// If an account with this email already exists, just link the guest
+		// orders to it instead of creating a duplicate.
+		$existing = email_exists( $email );
+		if ( $existing ) {
+			$linked = wc_update_new_customer_past_orders( $existing );
+			$user   = get_userdata( $existing );
+			return array(
+				'type'    => 'success',
+				'message' => sprintf(
+					/* translators: 1: email, 2: customer name, 3: number of orders linked */
+					__( 'An account for %1$s already exists (%2$s) — %3$d guest order(s) were linked to it. You can gift them credit above.', 'wc-simple-store-credit' ),
+					esc_html( $email ),
+					esc_html( $user ? $user->display_name : '' ),
+					(int) $linked
+				),
+			);
+		}
+
+		// Force-generate the username and password so account creation never
+		// depends on the store's registration settings, and so the welcome
+		// email includes a set-your-password link.
+		$force_yes = function () {
+			return 'yes';
+		};
+		add_filter( 'pre_option_woocommerce_registration_generate_username', $force_yes );
+		add_filter( 'pre_option_woocommerce_registration_generate_password', $force_yes );
+		$user_id = wc_create_new_customer( $email );
+		remove_filter( 'pre_option_woocommerce_registration_generate_username', $force_yes );
+		remove_filter( 'pre_option_woocommerce_registration_generate_password', $force_yes );
+
+		if ( is_wp_error( $user_id ) ) {
+			return array(
+				'type'    => 'error',
+				'message' => $user_id->get_error_message(),
+			);
+		}
+
+		// Copy the order's billing/shipping details onto the new account.
+		foreach ( array( 'billing', 'shipping' ) as $type ) {
+			foreach ( $order->get_address( $type ) as $key => $value ) {
+				if ( $value ) {
+					update_user_meta( $user_id, $type . '_' . $key, $value );
+				}
+			}
+		}
+		wp_update_user(
+			array(
+				'ID'         => $user_id,
+				'first_name' => $order->get_billing_first_name(),
+				'last_name'  => $order->get_billing_last_name(),
+			)
+		);
+
+		$linked = wc_update_new_customer_past_orders( $user_id );
+
+		return array(
+			'type'    => 'success',
+			'message' => sprintf(
+				/* translators: 1: customer name, 2: email, 3: number of orders linked */
+				__( 'Account created for %1$s (%2$s) and %3$d order(s) linked to it. They\'ve been emailed a link to set their password. You can now gift them credit above.', 'wc-simple-store-credit' ),
+				esc_html( trim( $order->get_billing_first_name() . ' ' . $order->get_billing_last_name() ) ),
+				esc_html( $email ),
+				(int) $linked
+			),
+		);
 	}
 
 	private function admin_balances_table() {
