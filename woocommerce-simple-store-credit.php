@@ -23,6 +23,9 @@ class WC_Simple_Store_Credit {
 	/** @var WC_Simple_Store_Credit */
 	private static $instance;
 
+	/** @var string Last wp_mail failure message, captured during our sends. */
+	private $mail_error = '';
+
 	public static function instance() {
 		if ( ! self::$instance ) {
 			self::$instance = new self();
@@ -520,6 +523,9 @@ class WC_Simple_Store_Credit {
 		if ( ! $notice ) {
 			$notice = $this->maybe_handle_guest_account_post();
 		}
+		if ( ! $notice ) {
+			$notice = $this->maybe_handle_test_email_post();
+		}
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Store Credit', 'wc-simple-store-credit' ); ?></h1>
@@ -615,6 +621,12 @@ class WC_Simple_Store_Credit {
 				</table>
 				<?php submit_button( __( 'Save email template', 'wc-simple-store-credit' ), 'secondary', 'wcsc_save_template' ); ?>
 			</form>
+
+			<form method="post" style="margin-top:.5em;">
+				<?php wp_nonce_field( 'wcsc_test_email' ); ?>
+				<?php submit_button( __( 'Send me a test email', 'wc-simple-store-credit' ), 'secondary', 'wcsc_send_test', false ); ?>
+				<p class="description"><?php esc_html_e( 'Sends the saved template to your own email address with sample values, and reports any mail-system error. Save the template first to test recent edits.', 'wc-simple-store-credit' ); ?></p>
+			</form>
 		</div>
 		<?php
 	}
@@ -681,26 +693,65 @@ class WC_Simple_Store_Credit {
 
 		$new = $this->adjust_balance( $user_id, $deduct ? -$amount : $amount, $note );
 
-		$emailed = false;
+		$type       = 'success';
+		$email_note = '';
 		if ( ! $deduct && ! empty( $_POST['wcsc_notify'] ) ) {
-			$emailed = $this->send_gift_email( $user, $amount, $note, $new );
+			if ( $this->send_gift_email( $user, $amount, $note, $new ) ) {
+				$email_note = sprintf(
+					/* translators: %s: customer email address */
+					__( 'A notification email was sent to %s.', 'wc-simple-store-credit' ),
+					esc_html( $user->user_email )
+				);
+			} else {
+				$type       = 'warning';
+				$email_note = sprintf(
+					/* translators: %s: mail error detail */
+					__( 'However, the notification email could NOT be sent%s. Use the "Send me a test email" button below to diagnose.', 'wc-simple-store-credit' ),
+					$this->mail_error ? ' — ' . esc_html( $this->mail_error ) : ''
+				);
+			}
 		}
 
 		return array(
-			'type'    => 'success',
+			'type'    => $type,
 			'message' => sprintf(
 				/* translators: 1: customer name, 2: new balance */
 				__( 'Done! %1$s now has a store credit balance of %2$s.', 'wc-simple-store-credit' ),
 				esc_html( $user->display_name ),
 				wc_price( $new )
-			) . ' ' . (
-				$emailed
-					? sprintf(
-						/* translators: %s: customer email address */
-						__( 'A notification email was sent to %s.', 'wc-simple-store-credit' ),
-						esc_html( $user->user_email )
-					)
-					: ''
+			) . ' ' . $email_note,
+		);
+	}
+
+	private function maybe_handle_test_email_post() {
+		if ( 'POST' !== ( $_SERVER['REQUEST_METHOD'] ?? '' ) || ! isset( $_POST['wcsc_send_test'] ) ) {
+			return null;
+		}
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return null;
+		}
+		check_admin_referer( 'wcsc_test_email' );
+
+		$me   = wp_get_current_user();
+		$sent = $this->send_gift_email( $me, 12.34, __( 'This is a test note.', 'wc-simple-store-credit' ), 56.78 );
+
+		if ( $sent ) {
+			return array(
+				'type'    => 'success',
+				'message' => sprintf(
+					/* translators: %s: admin email address */
+					__( 'Test email handed off to the mail system for %s. If it doesn\'t arrive within a few minutes (check spam too), your site\'s outgoing mail isn\'t delivering — an SMTP plugin such as WP Mail SMTP usually fixes that.', 'wc-simple-store-credit' ),
+					esc_html( $me->user_email )
+				),
+			);
+		}
+
+		return array(
+			'type'    => 'error',
+			'message' => sprintf(
+				/* translators: %s: mail error detail */
+				__( 'Test email failed to send%s. Your site\'s outgoing mail is not working — this affects all WooCommerce emails, not just store credit. Installing an SMTP plugin such as WP Mail SMTP (connected to your email provider) is the usual fix.', 'wc-simple-store-credit' ),
+				$this->mail_error ? ' — ' . esc_html( $this->mail_error ) : ''
 			),
 		);
 	}
@@ -757,7 +808,18 @@ class WC_Simple_Store_Credit {
 		);
 		$body = wpautop( trim( $body ) );
 
-		return (bool) $mailer->send( $user->user_email, $subject, $mailer->wrap_message( $template['heading'], $body ) );
+		// Capture the reason if the mail system rejects the send, so the
+		// admin notice can say more than "it didn't work".
+		$this->mail_error = '';
+		add_action( 'wp_mail_failed', array( $this, 'capture_mail_error' ) );
+		$sent = (bool) $mailer->send( $user->user_email, $subject, $mailer->wrap_message( $template['heading'], $body ) );
+		remove_action( 'wp_mail_failed', array( $this, 'capture_mail_error' ) );
+
+		return $sent;
+	}
+
+	public function capture_mail_error( $wp_error ) {
+		$this->mail_error = $wp_error->get_error_message();
 	}
 
 	private function maybe_handle_guest_account_post() {
