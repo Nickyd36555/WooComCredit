@@ -818,17 +818,37 @@ class WC_Simple_Store_Credit {
 			);
 		}
 
-		// Force-generate the username and password so account creation never
-		// depends on the store's registration settings, and so the welcome
-		// email includes a set-your-password link.
-		$force_yes = function () {
-			return 'yes';
-		};
-		add_filter( 'pre_option_woocommerce_registration_generate_username', $force_yes );
-		add_filter( 'pre_option_woocommerce_registration_generate_password', $force_yes );
-		$user_id = wc_create_new_customer( $email );
-		remove_filter( 'pre_option_woocommerce_registration_generate_username', $force_yes );
-		remove_filter( 'pre_option_woocommerce_registration_generate_password', $force_yes );
+		// Create the user directly rather than through WooCommerce's
+		// registration pipeline: this is an admin-initiated action (already
+		// capability- and nonce-protected), so captcha/anti-spam plugins
+		// guarding the public registration form must not block it.
+		if ( function_exists( 'wc_create_new_customer_username' ) ) {
+			$username = wc_create_new_customer_username(
+				$email,
+				array(
+					'first_name' => $order->get_billing_first_name(),
+					'last_name'  => $order->get_billing_last_name(),
+				)
+			);
+		} else {
+			$username = sanitize_user( current( explode( '@', $email ) ), true );
+			$suffix   = 1;
+			while ( username_exists( $username ) ) {
+				$username = sanitize_user( current( explode( '@', $email ) ), true ) . $suffix++;
+			}
+		}
+
+		$password = wp_generate_password( 24 );
+		$user_id  = wp_insert_user(
+			array(
+				'user_login' => $username,
+				'user_pass'  => $password,
+				'user_email' => $email,
+				'first_name' => $order->get_billing_first_name(),
+				'last_name'  => $order->get_billing_last_name(),
+				'role'       => 'customer',
+			)
+		);
 
 		if ( is_wp_error( $user_id ) ) {
 			return array(
@@ -836,6 +856,20 @@ class WC_Simple_Store_Credit {
 				'message' => $user_id->get_error_message(),
 			);
 		}
+
+		// Fire WooCommerce's created-customer hook (password_generated = true)
+		// so the standard New Account email goes out with a set-password link.
+		do_action(
+			'woocommerce_created_customer',
+			$user_id,
+			array(
+				'user_login' => $username,
+				'user_pass'  => $password,
+				'user_email' => $email,
+				'role'       => 'customer',
+			),
+			true
+		);
 
 		// Copy the order's billing/shipping details onto the new account.
 		foreach ( array( 'billing', 'shipping' ) as $type ) {
@@ -845,13 +879,6 @@ class WC_Simple_Store_Credit {
 				}
 			}
 		}
-		wp_update_user(
-			array(
-				'ID'         => $user_id,
-				'first_name' => $order->get_billing_first_name(),
-				'last_name'  => $order->get_billing_last_name(),
-			)
-		);
 
 		$linked = wc_update_new_customer_past_orders( $user_id );
 
