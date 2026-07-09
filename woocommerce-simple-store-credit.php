@@ -514,6 +514,9 @@ class WC_Simple_Store_Credit {
 		}
 
 		$notice = $this->maybe_handle_admin_post();
+		if ( ! $notice ) {
+			$notice = $this->maybe_handle_template_post();
+		}
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Store Credit', 'wc-simple-store-credit' ); ?></h1>
@@ -564,8 +567,63 @@ class WC_Simple_Store_Credit {
 
 			<h2><?php esc_html_e( 'Customers with credit', 'wc-simple-store-credit' ); ?></h2>
 			<?php $this->admin_balances_table(); ?>
+
+			<hr style="margin:2em 0;" />
+			<h2><?php esc_html_e( 'Gift email template', 'wc-simple-store-credit' ); ?></h2>
+			<p>
+				<?php esc_html_e( 'Customize the email customers receive when you gift them credit. Available placeholders:', 'wc-simple-store-credit' ); ?>
+				<code>{first_name}</code> <code>{amount}</code> <code>{balance}</code> <code>{note}</code> <code>{store_name}</code> <code>{account_link}</code>
+			</p>
+			<?php $template = $this->get_email_template(); ?>
+			<form method="post">
+				<?php wp_nonce_field( 'wcsc_email_template' ); ?>
+				<table class="form-table">
+					<tr>
+						<th scope="row"><label for="wcsc_email_subject"><?php esc_html_e( 'Subject', 'wc-simple-store-credit' ); ?></label></th>
+						<td><input type="text" id="wcsc_email_subject" name="wcsc_email_subject" class="large-text" value="<?php echo esc_attr( $template['subject'] ); ?>" /></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="wcsc_email_heading"><?php esc_html_e( 'Heading', 'wc-simple-store-credit' ); ?></label></th>
+						<td><input type="text" id="wcsc_email_heading" name="wcsc_email_heading" class="large-text" value="<?php echo esc_attr( $template['heading'] ); ?>" /></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="wcsc_email_body"><?php esc_html_e( 'Message', 'wc-simple-store-credit' ); ?></label></th>
+						<td>
+							<textarea id="wcsc_email_body" name="wcsc_email_body" class="large-text" rows="10"><?php echo esc_textarea( $template['body'] ); ?></textarea>
+							<p class="description"><?php esc_html_e( 'Blank lines become paragraphs. Basic HTML (links, bold, italics) is allowed. Leave a field empty and save to restore its default text.', 'wc-simple-store-credit' ); ?></p>
+						</td>
+					</tr>
+				</table>
+				<?php submit_button( __( 'Save email template', 'wc-simple-store-credit' ), 'secondary', 'wcsc_save_template' ); ?>
+			</form>
 		</div>
 		<?php
+	}
+
+	private function maybe_handle_template_post() {
+		if ( 'POST' !== ( $_SERVER['REQUEST_METHOD'] ?? '' ) || ! isset( $_POST['wcsc_save_template'] ) ) {
+			return null;
+		}
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return null;
+		}
+		check_admin_referer( 'wcsc_email_template' );
+
+		$template = array();
+		foreach ( array( 'subject', 'heading', 'body' ) as $field ) {
+			$raw   = isset( $_POST[ 'wcsc_email_' . $field ] ) ? wp_unslash( $_POST[ 'wcsc_email_' . $field ] ) : '';
+			$clean = 'body' === $field ? trim( wp_kses_post( $raw ) ) : sanitize_text_field( $raw );
+			if ( '' !== $clean ) {
+				$template[ $field ] = $clean;
+			}
+			// Empty fields are omitted so the defaults kick back in.
+		}
+		update_option( 'wcsc_email_template', $template );
+
+		return array(
+			'type'    => 'success',
+			'message' => __( 'Email template saved.', 'wc-simple-store-credit' ),
+		);
 	}
 
 	private function maybe_handle_admin_post() {
@@ -629,59 +687,58 @@ class WC_Simple_Store_Credit {
 	}
 
 	/**
+	 * Editable email template, stored in one option with sane defaults.
+	 */
+	public function get_email_template() {
+		$defaults = array(
+			'subject' => __( 'You\'ve received {amount} in store credit at {store_name}', 'wc-simple-store-credit' ),
+			'heading' => __( 'You\'ve got store credit!', 'wc-simple-store-credit' ),
+			'body'    => __(
+				"Hi {first_name},\n\nWe've added {amount} in store credit to your account.\n\n{note}\n\nYour balance is now {balance}.\n\nUse it on any order at checkout — now or whenever you like. You can view your balance any time on your {account_link} page.",
+				'wc-simple-store-credit'
+			),
+		);
+		$saved = get_option( 'wcsc_email_template', array() );
+		return wp_parse_args( is_array( $saved ) ? $saved : array(), $defaults );
+	}
+
+	/**
 	 * Notify the customer they've been gifted credit, wrapped in the store's
 	 * standard WooCommerce email template.
 	 */
 	private function send_gift_email( $user, $amount, $note, $new_balance ) {
 		$mailer     = WC()->mailer();
+		$template   = $this->get_email_template();
 		$store_name = wp_specialchars_decode( get_option( 'blogname' ), ENT_QUOTES );
+		$first_name = $user->first_name ? $user->first_name : $user->display_name;
 
-		$subject = sprintf(
-			/* translators: 1: credit amount, 2: store name */
-			__( 'You\'ve received %1$s in store credit at %2$s', 'wc-simple-store-credit' ),
-			html_entity_decode( wp_strip_all_tags( wc_price( $amount ) ), ENT_QUOTES, 'UTF-8' ),
-			$store_name
+		// Plain-text values for the subject line.
+		$subject = strtr(
+			$template['subject'],
+			array(
+				'{first_name}' => $first_name,
+				'{amount}'     => html_entity_decode( wp_strip_all_tags( wc_price( $amount ) ), ENT_QUOTES, 'UTF-8' ),
+				'{balance}'    => html_entity_decode( wp_strip_all_tags( wc_price( $new_balance ) ), ENT_QUOTES, 'UTF-8' ),
+				'{note}'       => $note,
+				'{store_name}' => $store_name,
+			)
 		);
 
-		$heading = __( 'You\'ve got store credit!', 'wc-simple-store-credit' );
+		// HTML values for the body.
+		$body = strtr(
+			wp_kses_post( $template['body'] ),
+			array(
+				'{first_name}'   => esc_html( $first_name ),
+				'{amount}'       => '<strong>' . wp_kses_post( wc_price( $amount ) ) . '</strong>',
+				'{balance}'      => '<strong>' . wp_kses_post( wc_price( $new_balance ) ) . '</strong>',
+				'{note}'         => $note ? '<em>' . esc_html( $note ) . '</em>' : '',
+				'{store_name}'   => esc_html( $store_name ),
+				'{account_link}' => '<a href="' . esc_url( wc_get_account_endpoint_url( self::ENDPOINT ) ) . '">' . esc_html__( 'Store Credit', 'wc-simple-store-credit' ) . '</a>',
+			)
+		);
+		$body = wpautop( trim( $body ) );
 
-		ob_start();
-		?>
-		<p><?php printf( /* translators: %s: customer first name */ esc_html__( 'Hi %s,', 'wc-simple-store-credit' ), esc_html( $user->first_name ? $user->first_name : $user->display_name ) ); ?></p>
-		<p>
-			<?php
-			printf(
-				/* translators: %s: credit amount */
-				esc_html__( 'We\'ve added %s in store credit to your account.', 'wc-simple-store-credit' ),
-				'<strong>' . wp_kses_post( wc_price( $amount ) ) . '</strong>'
-			);
-			?>
-		</p>
-		<?php if ( $note ) : ?>
-			<p><em><?php echo esc_html( $note ); ?></em></p>
-		<?php endif; ?>
-		<p>
-			<?php
-			printf(
-				/* translators: %s: new balance */
-				esc_html__( 'Your balance is now %s.', 'wc-simple-store-credit' ),
-				'<strong>' . wp_kses_post( wc_price( $new_balance ) ) . '</strong>'
-			);
-			?>
-		</p>
-		<p>
-			<?php
-			printf(
-				/* translators: %s: link to the Store Credit account page */
-				esc_html__( 'Use it on any order at checkout — now or whenever you like. You can view your balance any time under %s.', 'wc-simple-store-credit' ),
-				'<a href="' . esc_url( wc_get_account_endpoint_url( self::ENDPOINT ) ) . '">' . esc_html__( 'My Account → Store Credit', 'wc-simple-store-credit' ) . '</a>'
-			);
-			?>
-		</p>
-		<?php
-		$body = ob_get_clean();
-
-		return (bool) $mailer->send( $user->user_email, $subject, $mailer->wrap_message( $heading, $body ) );
+		return (bool) $mailer->send( $user->user_email, $subject, $mailer->wrap_message( $template['heading'], $body ) );
 	}
 
 	private function admin_balances_table() {
