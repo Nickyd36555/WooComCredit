@@ -527,6 +527,9 @@ class WC_Simple_Store_Credit {
 			$notice = $this->maybe_handle_test_email_post();
 		}
 		if ( ! $notice ) {
+			$notice = $this->maybe_handle_promo_reset();
+		}
+		if ( ! $notice ) {
 			$notice = $this->maybe_handle_promo_pick();
 		}
 		if ( ! $notice ) {
@@ -991,12 +994,42 @@ class WC_Simple_Store_Credit {
 
 	private function get_promo_settings() {
 		$defaults = array(
-			'min'  => 5,
-			'max'  => 50,
-			'note' => __( 'Congratulations — you\'ve been randomly selected for our daily store credit giveaway!', 'wc-simple-store-credit' ),
+			'min'    => 5,
+			'max'    => 50,
+			'budget' => 500,
+			'note'   => __( 'Congratulations — you\'ve been randomly selected for our daily store credit giveaway!', 'wc-simple-store-credit' ),
 		);
 		$saved = get_option( 'wcsc_promo_settings', array() );
 		return wp_parse_args( is_array( $saved ) ? $saved : array(), $defaults );
+	}
+
+	private function get_promo_spent() {
+		return max( 0, (float) get_option( 'wcsc_promo_spent', 0 ) );
+	}
+
+	private function get_promo_remaining() {
+		return max( 0, round( (float) $this->get_promo_settings()['budget'] - $this->get_promo_spent(), wc_get_price_decimals() ) );
+	}
+
+	private function maybe_handle_promo_reset() {
+		if ( 'POST' !== ( $_SERVER['REQUEST_METHOD'] ?? '' ) || ! isset( $_POST['wcsc_promo_reset'] ) ) {
+			return null;
+		}
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return null;
+		}
+		check_admin_referer( 'wcsc_promo' );
+
+		update_option( 'wcsc_promo_spent', 0 );
+
+		return array(
+			'type'    => 'success',
+			'message' => sprintf(
+				/* translators: %s: budget amount */
+				__( 'Giveaway counter reset — the full %s budget is available again. (Credit already sent to winners is not affected.)', 'wc-simple-store-credit' ),
+				wc_price( $this->get_promo_settings()['budget'] )
+			),
+		);
 	}
 
 	private function maybe_handle_promo_pick() {
@@ -1014,9 +1047,10 @@ class WC_Simple_Store_Credit {
 		$max = max( $min, $max );
 
 		$settings = array(
-			'min'  => $min,
-			'max'  => $max,
-			'note' => isset( $_POST['wcsc_promo_note'] ) ? sanitize_text_field( wp_unslash( $_POST['wcsc_promo_note'] ) ) : '',
+			'min'    => $min,
+			'max'    => $max,
+			'budget' => isset( $_POST['wcsc_promo_budget'] ) ? max( 0, (float) wc_format_decimal( wp_unslash( $_POST['wcsc_promo_budget'] ) ) ) : 500,
+			'note'   => isset( $_POST['wcsc_promo_note'] ) ? sanitize_text_field( wp_unslash( $_POST['wcsc_promo_note'] ) ) : '',
 		);
 		if ( '' === $settings['note'] ) {
 			$settings['note'] = $this->get_promo_settings()['note'];
@@ -1122,6 +1156,19 @@ class WC_Simple_Store_Credit {
 			);
 		}
 
+		$remaining = $this->get_promo_remaining();
+		if ( $amount > $remaining + 0.001 ) {
+			return array(
+				'type'    => 'error',
+				'message' => sprintf(
+					/* translators: 1: remaining budget, 2: requested amount */
+					__( 'Only %1$s is left in the giveaway budget, so %2$s can\'t be sent. Lower the amount, raise the budget, or reset the counter.', 'wc-simple-store-credit' ),
+					wc_price( $remaining ),
+					wc_price( $amount )
+				),
+			);
+		}
+
 		$order = wc_get_order( $row['order_id'] );
 		if ( ! $order ) {
 			return array(
@@ -1152,12 +1199,19 @@ class WC_Simple_Store_Credit {
 		$promo['winners'][ $index ]['user_id'] = (int) $user_id;
 		update_option( 'wcsc_promo', $promo );
 
+		update_option( 'wcsc_promo_spent', round( $this->get_promo_spent() + $amount, wc_get_price_decimals() ) );
+
 		$message = sprintf(
 			/* translators: 1: credit amount, 2: winner name, 3: winner email */
 			__( 'Sent %1$s store credit to %2$s (%3$s).', 'wc-simple-store-credit' ),
 			wc_price( $amount ),
 			esc_html( $row['name'] ),
 			esc_html( $row['email'] )
+		) . ' ' . sprintf(
+			/* translators: 1: remaining budget, 2: total budget */
+			__( '%1$s remaining of your %2$s giveaway budget.', 'wc-simple-store-credit' ),
+			wc_price( $this->get_promo_remaining() ),
+			wc_price( $this->get_promo_settings()['budget'] )
 		);
 		if ( $emailed ) {
 			$message .= ' ' . __( 'They\'ve been notified by email.', 'wc-simple-store-credit' );
@@ -1183,12 +1237,30 @@ class WC_Simple_Store_Credit {
 		$promo    = get_option( 'wcsc_promo' );
 		$symbol   = get_woocommerce_currency_symbol();
 		?>
+		<?php
+		$budget    = (float) $settings['budget'];
+		$spent     = $this->get_promo_spent();
+		$remaining = $this->get_promo_remaining();
+		?>
 		<hr style="margin:2em 0;" />
 		<h2><?php esc_html_e( 'Daily giveaway', 'wc-simple-store-credit' ); ?></h2>
-		<p><?php esc_html_e( 'Pick 5 customers at random from yesterday\'s paid orders and gift each a random amount of store credit. Winners are emailed automatically when you click Send. Guest winners get an account created for them on the spot.', 'wc-simple-store-credit' ); ?></p>
+		<p><?php esc_html_e( 'Pick 5 customers at random from yesterday\'s paid orders and gift each a random amount of store credit. Winners are emailed automatically when you click Send. Guest winners get an account created for them on the spot. Sending stops when the budget runs out.', 'wc-simple-store-credit' ); ?></p>
+		<p style="font-size:1.15em;border:1px solid #c3c4c7;border-left:4px solid <?php echo $remaining > 0 ? '#1a7f37' : '#c0392b'; ?>;background:#fff;padding:.75em 1em;max-width:600px;">
+			<?php esc_html_e( 'Budget:', 'wc-simple-store-credit' ); ?> <?php echo wp_kses_post( wc_price( $budget ) ); ?>
+			&nbsp;·&nbsp; <?php esc_html_e( 'Given away:', 'wc-simple-store-credit' ); ?> <?php echo wp_kses_post( wc_price( $spent ) ); ?>
+			&nbsp;·&nbsp; <strong style="color:<?php echo $remaining > 0 ? '#1a7f37' : '#c0392b'; ?>;"><?php esc_html_e( 'Remaining:', 'wc-simple-store-credit' ); ?> <?php echo wp_kses_post( wc_price( $remaining ) ); ?></strong>
+		</p>
 		<form method="post">
 			<?php wp_nonce_field( 'wcsc_promo' ); ?>
 			<table class="form-table">
+				<tr>
+					<th scope="row"><label for="wcsc_promo_budget"><?php esc_html_e( 'Giveaway budget', 'wc-simple-store-credit' ); ?> (<?php echo esc_html( $symbol ); ?>)</label></th>
+					<td>
+						<input type="number" step="0.01" min="0" id="wcsc_promo_budget" name="wcsc_promo_budget" style="width:120px;" value="<?php echo esc_attr( $settings['budget'] ); ?>" />
+						<button type="submit" name="wcsc_promo_reset" value="1" class="button" onclick="return confirm('<?php echo esc_js( __( 'Reset the given-away counter to zero and make the full budget available again?', 'wc-simple-store-credit' ) ); ?>');"><?php esc_html_e( 'Reset counter', 'wc-simple-store-credit' ); ?></button>
+						<p class="description"><?php esc_html_e( 'The budget is saved when you pick winners. Reset the counter when you start a new promotion.', 'wc-simple-store-credit' ); ?></p>
+					</td>
+				</tr>
 				<tr>
 					<th scope="row"><label for="wcsc_promo_min"><?php esc_html_e( 'Random amount between', 'wc-simple-store-credit' ); ?> (<?php echo esc_html( $symbol ); ?>)</label></th>
 					<td>
