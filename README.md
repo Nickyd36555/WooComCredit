@@ -11,6 +11,10 @@ it to any order at checkout — right away or whenever they feel like it.
 - **Gift/adjust credit from the admin** — a *WooCommerce → Store Credit* page
   with a customer search box, add/deduct actions, an optional note that the
   customer sees in their history, and a list of every customer holding credit.
+- **Daily giveaway** — pick 5 customers at random from yesterday's paid
+  orders, assign each a random credit amount within a range you choose
+  (editable per winner), and send with one click. Guest winners get an
+  account created automatically.
 - **Email notifications** — optionally email the customer when you gift them
   credit (on by default), using your store's standard WooCommerce email
   template with the amount, your note, their new balance, and a link to

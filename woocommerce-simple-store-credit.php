@@ -526,6 +526,12 @@ class WC_Simple_Store_Credit {
 		if ( ! $notice ) {
 			$notice = $this->maybe_handle_test_email_post();
 		}
+		if ( ! $notice ) {
+			$notice = $this->maybe_handle_promo_pick();
+		}
+		if ( ! $notice ) {
+			$notice = $this->maybe_handle_promo_send();
+		}
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Store Credit', 'wc-simple-store-credit' ); ?></h1>
@@ -573,6 +579,8 @@ class WC_Simple_Store_Credit {
 				</table>
 				<?php submit_button( __( 'Update credit', 'wc-simple-store-credit' ) ); ?>
 			</form>
+
+			<?php $this->render_promo_section(); ?>
 
 			<hr style="margin:2em 0;" />
 			<h2><?php esc_html_e( 'Create account from a guest order', 'wc-simple-store-credit' ); ?></h2>
@@ -854,30 +862,62 @@ class WC_Simple_Store_Credit {
 			);
 		}
 
-		$email = sanitize_email( $order->get_billing_email() );
-		if ( ! $email ) {
+		$user_id = $this->get_or_create_customer_for_order( $order, $created, $linked );
+		if ( is_wp_error( $user_id ) ) {
 			return array(
 				'type'    => 'error',
-				'message' => __( 'That order has no billing email address, so no account can be created.', 'wc-simple-store-credit' ),
+				'message' => $user_id->get_error_message(),
 			);
 		}
 
-		// If an account with this email already exists, just link the guest
-		// orders to it instead of creating a duplicate.
-		$existing = email_exists( $email );
-		if ( $existing ) {
-			$linked = wc_update_new_customer_past_orders( $existing );
-			$user   = get_userdata( $existing );
+		$user = get_userdata( $user_id );
+		if ( ! $created ) {
 			return array(
 				'type'    => 'success',
 				'message' => sprintf(
 					/* translators: 1: email, 2: customer name, 3: number of orders linked */
 					__( 'An account for %1$s already exists (%2$s) — %3$d guest order(s) were linked to it. You can gift them credit above.', 'wc-simple-store-credit' ),
-					esc_html( $email ),
+					esc_html( $order->get_billing_email() ),
 					esc_html( $user ? $user->display_name : '' ),
 					(int) $linked
 				),
 			);
+		}
+
+		return array(
+			'type'    => 'success',
+			'message' => sprintf(
+				/* translators: 1: customer name, 2: email, 3: number of orders linked */
+				__( 'Account created for %1$s (%2$s) and %3$d order(s) linked to it. They\'ve been emailed a link to set their password. You can now gift them credit above.', 'wc-simple-store-credit' ),
+				esc_html( trim( $order->get_billing_first_name() . ' ' . $order->get_billing_last_name() ) ),
+				esc_html( $order->get_billing_email() ),
+				(int) $linked
+			),
+		);
+	}
+
+	/**
+	 * Find (by billing email) or create a customer account for an order.
+	 * Creation deliberately bypasses the public registration pipeline
+	 * (captcha plugins would block it), so only call this from
+	 * capability-checked admin actions. Past guest orders with the same
+	 * email are linked to the account either way.
+	 *
+	 * @return int|WP_Error User ID.
+	 */
+	private function get_or_create_customer_for_order( $order, &$created = false, &$linked = 0 ) {
+		$created = false;
+		$linked  = 0;
+
+		$email = sanitize_email( $order->get_billing_email() );
+		if ( ! $email ) {
+			return new WP_Error( 'wcsc_no_email', __( 'That order has no billing email address, so no account can be created.', 'wc-simple-store-credit' ) );
+		}
+
+		$existing = email_exists( $email );
+		if ( $existing ) {
+			$linked = (int) wc_update_new_customer_past_orders( $existing );
+			return (int) $existing;
 		}
 
 		// Create the user directly rather than through WooCommerce's
@@ -913,10 +953,7 @@ class WC_Simple_Store_Credit {
 		);
 
 		if ( is_wp_error( $user_id ) ) {
-			return array(
-				'type'    => 'error',
-				'message' => $user_id->get_error_message(),
-			);
+			return $user_id;
 		}
 
 		// Fire WooCommerce's created-customer hook (password_generated = true)
@@ -942,18 +979,293 @@ class WC_Simple_Store_Credit {
 			}
 		}
 
-		$linked = wc_update_new_customer_past_orders( $user_id );
+		$linked  = (int) wc_update_new_customer_past_orders( $user_id );
+		$created = true;
+
+		return (int) $user_id;
+	}
+
+	/* -------------------------------------------------------------------------
+	 * Daily giveaway
+	 * ---------------------------------------------------------------------- */
+
+	private function get_promo_settings() {
+		$defaults = array(
+			'min'  => 5,
+			'max'  => 50,
+			'note' => __( 'Congratulations — you\'ve been randomly selected for our daily store credit giveaway!', 'wc-simple-store-credit' ),
+		);
+		$saved = get_option( 'wcsc_promo_settings', array() );
+		return wp_parse_args( is_array( $saved ) ? $saved : array(), $defaults );
+	}
+
+	private function maybe_handle_promo_pick() {
+		if ( 'POST' !== ( $_SERVER['REQUEST_METHOD'] ?? '' ) || ! isset( $_POST['wcsc_promo_pick'] ) ) {
+			return null;
+		}
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return null;
+		}
+		check_admin_referer( 'wcsc_promo' );
+
+		$min = isset( $_POST['wcsc_promo_min'] ) ? (float) wc_format_decimal( wp_unslash( $_POST['wcsc_promo_min'] ) ) : 5;
+		$max = isset( $_POST['wcsc_promo_max'] ) ? (float) wc_format_decimal( wp_unslash( $_POST['wcsc_promo_max'] ) ) : 50;
+		$min = max( 0.01, $min );
+		$max = max( $min, $max );
+
+		$settings = array(
+			'min'  => $min,
+			'max'  => $max,
+			'note' => isset( $_POST['wcsc_promo_note'] ) ? sanitize_text_field( wp_unslash( $_POST['wcsc_promo_note'] ) ) : '',
+		);
+		if ( '' === $settings['note'] ) {
+			$settings['note'] = $this->get_promo_settings()['note'];
+		}
+		update_option( 'wcsc_promo_settings', $settings );
+
+		// Yesterday, in the store's timezone.
+		$tz    = wp_timezone();
+		$start = ( new DateTimeImmutable( 'yesterday', $tz ) )->setTime( 0, 0 )->getTimestamp();
+		$end   = ( new DateTimeImmutable( 'today', $tz ) )->setTime( 0, 0 )->getTimestamp() - 1;
+
+		$orders = wc_get_orders(
+			array(
+				'limit'        => 300,
+				'status'       => array( 'processing', 'completed' ),
+				'date_created' => $start . '...' . $end,
+			)
+		);
+
+		// One entry per customer, keyed by billing email.
+		$pool = array();
+		foreach ( $orders as $order ) {
+			$email = strtolower( sanitize_email( $order->get_billing_email() ) );
+			if ( ! $email || isset( $pool[ $email ] ) ) {
+				continue;
+			}
+			$pool[ $email ] = $order;
+		}
+
+		if ( empty( $pool ) ) {
+			return array(
+				'type'    => 'error',
+				'message' => __( 'No paid orders from yesterday were found, so there\'s no one to pick from.', 'wc-simple-store-credit' ),
+			);
+		}
+
+		$pool = array_values( $pool );
+		shuffle( $pool );
+		$winners = array();
+		foreach ( array_slice( $pool, 0, 5 ) as $order ) {
+			$winners[] = array(
+				'order_id' => $order->get_id(),
+				'number'   => $order->get_order_number(),
+				'name'     => trim( $order->get_billing_first_name() . ' ' . $order->get_billing_last_name() ),
+				'email'    => $order->get_billing_email(),
+				'user_id'  => (int) $order->get_user_id(),
+				'total'    => (float) $order->get_total(),
+				'amount'   => round( mt_rand( (int) round( $min * 100 ), (int) round( $max * 100 ) ) / 100, 2 ),
+				'sent'     => false,
+			);
+		}
+
+		update_option(
+			'wcsc_promo',
+			array(
+				'date'    => current_time( 'Y-m-d' ),
+				'winners' => $winners,
+			)
+		);
 
 		return array(
 			'type'    => 'success',
 			'message' => sprintf(
-				/* translators: 1: customer name, 2: email, 3: number of orders linked */
-				__( 'Account created for %1$s (%2$s) and %3$d order(s) linked to it. They\'ve been emailed a link to set their password. You can now gift them credit above.', 'wc-simple-store-credit' ),
-				esc_html( trim( $order->get_billing_first_name() . ' ' . $order->get_billing_last_name() ) ),
-				esc_html( $email ),
-				(int) $linked
+				/* translators: 1: winners picked, 2: customers in the pool */
+				__( 'Picked %1$d winner(s) at random from %2$d customer(s) who ordered yesterday. Review the list below and send the credit.', 'wc-simple-store-credit' ),
+				count( $winners ),
+				count( $pool )
 			),
 		);
+	}
+
+	private function maybe_handle_promo_send() {
+		if ( 'POST' !== ( $_SERVER['REQUEST_METHOD'] ?? '' ) || ! isset( $_POST['wcsc_promo_send'] ) ) {
+			return null;
+		}
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return null;
+		}
+		check_admin_referer( 'wcsc_promo' );
+
+		$promo = get_option( 'wcsc_promo' );
+		$index = isset( $_POST['wcsc_promo_index'] ) ? absint( $_POST['wcsc_promo_index'] ) : 0;
+		if ( ! is_array( $promo ) || ! isset( $promo['winners'][ $index ] ) ) {
+			return array(
+				'type'    => 'error',
+				'message' => __( 'That giveaway entry could not be found — try picking winners again.', 'wc-simple-store-credit' ),
+			);
+		}
+
+		$row = $promo['winners'][ $index ];
+		if ( ! empty( $row['sent'] ) ) {
+			return array(
+				'type'    => 'error',
+				'message' => __( 'That winner has already received their credit.', 'wc-simple-store-credit' ),
+			);
+		}
+
+		$amount = isset( $_POST['wcsc_promo_amount'] ) ? (float) wc_format_decimal( wp_unslash( $_POST['wcsc_promo_amount'] ) ) : 0;
+		if ( $amount <= 0 ) {
+			return array(
+				'type'    => 'error',
+				'message' => __( 'Please enter a credit amount greater than zero.', 'wc-simple-store-credit' ),
+			);
+		}
+
+		$order = wc_get_order( $row['order_id'] );
+		if ( ! $order ) {
+			return array(
+				'type'    => 'error',
+				'message' => __( 'The winner\'s order no longer exists.', 'wc-simple-store-credit' ),
+			);
+		}
+
+		$user_id = $order->get_user_id();
+		if ( ! $user_id ) {
+			$user_id = $this->get_or_create_customer_for_order( $order );
+			if ( is_wp_error( $user_id ) ) {
+				return array(
+					'type'    => 'error',
+					'message' => $user_id->get_error_message(),
+				);
+			}
+		}
+
+		$note = $this->get_promo_settings()['note'];
+		$new  = $this->adjust_balance( $user_id, $amount, $note );
+
+		$user    = get_userdata( $user_id );
+		$emailed = $user ? $this->send_gift_email( $user, $amount, $note, $new ) : false;
+
+		$promo['winners'][ $index ]['sent']    = true;
+		$promo['winners'][ $index ]['amount']  = $amount;
+		$promo['winners'][ $index ]['user_id'] = (int) $user_id;
+		update_option( 'wcsc_promo', $promo );
+
+		$message = sprintf(
+			/* translators: 1: credit amount, 2: winner name, 3: winner email */
+			__( 'Sent %1$s store credit to %2$s (%3$s).', 'wc-simple-store-credit' ),
+			wc_price( $amount ),
+			esc_html( $row['name'] ),
+			esc_html( $row['email'] )
+		);
+		if ( $emailed ) {
+			$message .= ' ' . __( 'They\'ve been notified by email.', 'wc-simple-store-credit' );
+			return array(
+				'type'    => 'success',
+				'message' => $message,
+			);
+		}
+
+		$message .= ' ' . sprintf(
+			/* translators: %s: mail error detail */
+			__( 'However, the notification email could NOT be sent%s.', 'wc-simple-store-credit' ),
+			$this->mail_error ? ' — ' . esc_html( $this->mail_error ) : ''
+		);
+		return array(
+			'type'    => 'warning',
+			'message' => $message,
+		);
+	}
+
+	private function render_promo_section() {
+		$settings = $this->get_promo_settings();
+		$promo    = get_option( 'wcsc_promo' );
+		$symbol   = get_woocommerce_currency_symbol();
+		?>
+		<hr style="margin:2em 0;" />
+		<h2><?php esc_html_e( 'Daily giveaway', 'wc-simple-store-credit' ); ?></h2>
+		<p><?php esc_html_e( 'Pick 5 customers at random from yesterday\'s paid orders and gift each a random amount of store credit. Winners are emailed automatically when you click Send. Guest winners get an account created for them on the spot.', 'wc-simple-store-credit' ); ?></p>
+		<form method="post">
+			<?php wp_nonce_field( 'wcsc_promo' ); ?>
+			<table class="form-table">
+				<tr>
+					<th scope="row"><label for="wcsc_promo_min"><?php esc_html_e( 'Random amount between', 'wc-simple-store-credit' ); ?> (<?php echo esc_html( $symbol ); ?>)</label></th>
+					<td>
+						<input type="number" step="0.01" min="0.01" id="wcsc_promo_min" name="wcsc_promo_min" style="width:100px;" value="<?php echo esc_attr( $settings['min'] ); ?>" />
+						&nbsp;<?php esc_html_e( 'and', 'wc-simple-store-credit' ); ?>&nbsp;
+						<input type="number" step="0.01" min="0.01" name="wcsc_promo_max" style="width:100px;" value="<?php echo esc_attr( $settings['max'] ); ?>" />
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="wcsc_promo_note"><?php esc_html_e( 'Message to winners', 'wc-simple-store-credit' ); ?></label></th>
+					<td><input type="text" id="wcsc_promo_note" name="wcsc_promo_note" class="large-text" value="<?php echo esc_attr( $settings['note'] ); ?>" /></td>
+				</tr>
+			</table>
+			<?php
+			$has_today = is_array( $promo ) && ! empty( $promo['winners'] ) && ( $promo['date'] ?? '' ) === current_time( 'Y-m-d' );
+			submit_button(
+				$has_today
+					? __( 'Re-pick winners (replaces today\'s list)', 'wc-simple-store-credit' )
+					: __( 'Pick 5 winners from yesterday', 'wc-simple-store-credit' ),
+				'primary',
+				'wcsc_promo_pick'
+			);
+			?>
+		</form>
+		<?php
+		if ( ! is_array( $promo ) || empty( $promo['winners'] ) ) {
+			return;
+		}
+		?>
+		<h3>
+			<?php
+			printf(
+				/* translators: %s: date the winners were picked */
+				esc_html__( 'Winners picked on %s', 'wc-simple-store-credit' ),
+				esc_html( $promo['date'] ?? '' )
+			);
+			?>
+		</h3>
+		<table class="widefat striped" style="max-width:1000px;">
+			<thead>
+				<tr>
+					<th><?php esc_html_e( 'Order', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Customer', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Email', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Order total', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Store credit', 'wc-simple-store-credit' ); ?></th>
+				</tr>
+			</thead>
+			<tbody>
+				<?php foreach ( $promo['winners'] as $i => $row ) : ?>
+					<tr>
+						<td>#<?php echo esc_html( $row['number'] ); ?></td>
+						<td>
+							<?php echo esc_html( $row['name'] ? $row['name'] : '—' ); ?>
+							<?php if ( empty( $row['user_id'] ) && empty( $row['sent'] ) ) : ?>
+								<br /><small><em><?php esc_html_e( 'guest — an account will be created', 'wc-simple-store-credit' ); ?></em></small>
+							<?php endif; ?>
+						</td>
+						<td><?php echo esc_html( $row['email'] ); ?></td>
+						<td><?php echo wp_kses_post( wc_price( $row['total'] ) ); ?></td>
+						<td>
+							<?php if ( ! empty( $row['sent'] ) ) : ?>
+								<strong style="color:#1a7f37;">✓ <?php printf( /* translators: %s: amount sent */ esc_html__( 'Sent %s', 'wc-simple-store-credit' ), wp_kses_post( wc_price( $row['amount'] ) ) ); ?></strong>
+							<?php else : ?>
+								<form method="post" style="margin:0;display:flex;gap:.5em;align-items:center;">
+									<?php wp_nonce_field( 'wcsc_promo' ); ?>
+									<input type="hidden" name="wcsc_promo_index" value="<?php echo esc_attr( $i ); ?>" />
+									<input type="number" step="0.01" min="0.01" name="wcsc_promo_amount" style="width:90px;" value="<?php echo esc_attr( $row['amount'] ); ?>" />
+									<button type="submit" name="wcsc_promo_send" value="1" class="button button-primary"><?php esc_html_e( 'Send credit', 'wc-simple-store-credit' ); ?></button>
+								</form>
+							<?php endif; ?>
+						</td>
+					</tr>
+				<?php endforeach; ?>
+			</tbody>
+		</table>
+		<?php
 	}
 
 	private function admin_balances_table() {
