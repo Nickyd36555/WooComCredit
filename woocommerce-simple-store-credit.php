@@ -605,39 +605,57 @@ class WC_Simple_Store_Credit {
 			<?php $this->admin_balances_table(); ?>
 
 			<hr style="margin:2em 0;" />
-			<h2><?php esc_html_e( 'Gift email template', 'wc-simple-store-credit' ); ?></h2>
+			<h2><?php esc_html_e( 'Email templates', 'wc-simple-store-credit' ); ?></h2>
 			<p>
-				<?php esc_html_e( 'Customize the email customers receive when you gift them credit. Available placeholders:', 'wc-simple-store-credit' ); ?>
+				<?php esc_html_e( 'Customize the emails customers receive. Available placeholders:', 'wc-simple-store-credit' ); ?>
 				<code>{first_name}</code> <code>{amount}</code> <code>{balance}</code> <code>{note}</code> <code>{store_name}</code> <code>{account_link}</code>
 			</p>
-			<?php $template = $this->get_email_template(); ?>
-			<form method="post">
-				<?php wp_nonce_field( 'wcsc_email_template' ); ?>
-				<table class="form-table">
-					<tr>
-						<th scope="row"><label for="wcsc_email_subject"><?php esc_html_e( 'Subject', 'wc-simple-store-credit' ); ?></label></th>
-						<td><input type="text" id="wcsc_email_subject" name="wcsc_email_subject" class="large-text" value="<?php echo esc_attr( $template['subject'] ); ?>" /></td>
-					</tr>
-					<tr>
-						<th scope="row"><label for="wcsc_email_heading"><?php esc_html_e( 'Heading', 'wc-simple-store-credit' ); ?></label></th>
-						<td><input type="text" id="wcsc_email_heading" name="wcsc_email_heading" class="large-text" value="<?php echo esc_attr( $template['heading'] ); ?>" /></td>
-					</tr>
-					<tr>
-						<th scope="row"><label for="wcsc_email_body"><?php esc_html_e( 'Message', 'wc-simple-store-credit' ); ?></label></th>
-						<td>
-							<textarea id="wcsc_email_body" name="wcsc_email_body" class="large-text" rows="10"><?php echo esc_textarea( $template['body'] ); ?></textarea>
-							<p class="description"><?php esc_html_e( 'Blank lines become paragraphs. Basic HTML (links, bold, italics) is allowed. Leave a field empty and save to restore its default text.', 'wc-simple-store-credit' ); ?></p>
-						</td>
-					</tr>
-				</table>
-				<?php submit_button( __( 'Save email template', 'wc-simple-store-credit' ), 'secondary', 'wcsc_save_template' ); ?>
-			</form>
+			<?php
+			$editors = array(
+				'gift'  => array(
+					'title' => __( 'Gift email', 'wc-simple-store-credit' ),
+					'desc'  => __( 'Sent when you gift credit from the form above. {note} is the note you type with the gift.', 'wc-simple-store-credit' ),
+				),
+				'promo' => array(
+					'title' => __( 'Giveaway winner email', 'wc-simple-store-credit' ),
+					'desc'  => __( 'Sent to daily giveaway winners. {note} is the "Message to winners" from the giveaway settings.', 'wc-simple-store-credit' ),
+				),
+			);
+			foreach ( $editors as $which => $editor ) :
+				$template = $this->get_email_template( $which );
+				?>
+				<h3><?php echo esc_html( $editor['title'] ); ?></h3>
+				<p class="description"><?php echo esc_html( $editor['desc'] ); ?></p>
+				<form method="post">
+					<?php wp_nonce_field( 'wcsc_email_template' ); ?>
+					<input type="hidden" name="wcsc_email_which" value="<?php echo esc_attr( $which ); ?>" />
+					<table class="form-table">
+						<tr>
+							<th scope="row"><label for="wcsc_email_subject_<?php echo esc_attr( $which ); ?>"><?php esc_html_e( 'Subject', 'wc-simple-store-credit' ); ?></label></th>
+							<td><input type="text" id="wcsc_email_subject_<?php echo esc_attr( $which ); ?>" name="wcsc_email_subject" class="large-text" value="<?php echo esc_attr( $template['subject'] ); ?>" /></td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="wcsc_email_heading_<?php echo esc_attr( $which ); ?>"><?php esc_html_e( 'Heading', 'wc-simple-store-credit' ); ?></label></th>
+							<td><input type="text" id="wcsc_email_heading_<?php echo esc_attr( $which ); ?>" name="wcsc_email_heading" class="large-text" value="<?php echo esc_attr( $template['heading'] ); ?>" /></td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="wcsc_email_body_<?php echo esc_attr( $which ); ?>"><?php esc_html_e( 'Message', 'wc-simple-store-credit' ); ?></label></th>
+							<td>
+								<textarea id="wcsc_email_body_<?php echo esc_attr( $which ); ?>" name="wcsc_email_body" class="large-text" rows="9"><?php echo esc_textarea( $template['body'] ); ?></textarea>
+								<p class="description"><?php esc_html_e( 'Blank lines become paragraphs. Basic HTML (links, bold, italics) is allowed. Leave a field empty and save to restore its default text.', 'wc-simple-store-credit' ); ?></p>
+							</td>
+						</tr>
+					</table>
+					<?php submit_button( __( 'Save template', 'wc-simple-store-credit' ), 'secondary', 'wcsc_save_template' ); ?>
+				</form>
 
-			<form method="post" style="margin-top:.5em;">
-				<?php wp_nonce_field( 'wcsc_test_email' ); ?>
-				<?php submit_button( __( 'Send me a test email', 'wc-simple-store-credit' ), 'secondary', 'wcsc_send_test', false ); ?>
-				<p class="description"><?php esc_html_e( 'Sends the saved template to your own email address with sample values, and reports any mail-system error. Save the template first to test recent edits.', 'wc-simple-store-credit' ); ?></p>
-			</form>
+				<form method="post" style="margin:-.5em 0 2em;">
+					<?php wp_nonce_field( 'wcsc_test_email' ); ?>
+					<input type="hidden" name="wcsc_email_which" value="<?php echo esc_attr( $which ); ?>" />
+					<?php submit_button( __( 'Send me a test email', 'wc-simple-store-credit' ), 'secondary', 'wcsc_send_test', false ); ?>
+					<span class="description">&nbsp;<?php esc_html_e( 'Sends the saved template to your own email address with sample values. Save first to test recent edits.', 'wc-simple-store-credit' ); ?></span>
+				</form>
+			<?php endforeach; ?>
 		</div>
 		<?php
 	}
@@ -651,6 +669,8 @@ class WC_Simple_Store_Credit {
 		}
 		check_admin_referer( 'wcsc_email_template' );
 
+		$which = isset( $_POST['wcsc_email_which'] ) && 'promo' === $_POST['wcsc_email_which'] ? 'promo' : 'gift';
+
 		$template = array();
 		foreach ( array( 'subject', 'heading', 'body' ) as $field ) {
 			$raw   = isset( $_POST[ 'wcsc_email_' . $field ] ) ? wp_unslash( $_POST[ 'wcsc_email_' . $field ] ) : '';
@@ -660,11 +680,13 @@ class WC_Simple_Store_Credit {
 			}
 			// Empty fields are omitted so the defaults kick back in.
 		}
-		update_option( 'wcsc_email_template', $template );
+		update_option( 'promo' === $which ? 'wcsc_promo_email_template' : 'wcsc_email_template', $template );
 
 		return array(
 			'type'    => 'success',
-			'message' => __( 'Email template saved.', 'wc-simple-store-credit' ),
+			'message' => 'promo' === $which
+				? __( 'Giveaway winner email template saved.', 'wc-simple-store-credit' )
+				: __( 'Gift email template saved.', 'wc-simple-store-credit' ),
 		);
 	}
 
@@ -743,8 +765,13 @@ class WC_Simple_Store_Credit {
 		}
 		check_admin_referer( 'wcsc_test_email' );
 
+		$which = isset( $_POST['wcsc_email_which'] ) && 'promo' === $_POST['wcsc_email_which'] ? 'promo' : 'gift';
+		$note  = 'promo' === $which
+			? $this->get_promo_settings()['note']
+			: __( 'This is a test note.', 'wc-simple-store-credit' );
+
 		$me   = wp_get_current_user();
-		$sent = $this->send_gift_email( $me, 12.34, __( 'This is a test note.', 'wc-simple-store-credit' ), 56.78 );
+		$sent = $this->send_gift_email( $me, 12.34, $note, 56.78, $which );
 
 		if ( $sent ) {
 			return array(
@@ -768,18 +795,31 @@ class WC_Simple_Store_Credit {
 	}
 
 	/**
-	 * Editable email template, stored in one option with sane defaults.
+	 * Editable email templates ('gift' and 'promo' winner), each stored in
+	 * its own option with sane defaults.
 	 */
-	public function get_email_template() {
-		$defaults = array(
-			'subject' => __( 'You\'ve received {amount} in store credit at {store_name}', 'wc-simple-store-credit' ),
-			'heading' => __( 'You\'ve got store credit!', 'wc-simple-store-credit' ),
-			'body'    => __(
-				"Hi {first_name},\n\nWe've added {amount} in store credit to your account.\n\n{note}\n\nYour balance is now {balance}.\n\nUse it on any order at checkout — now or whenever you like. You can view your balance any time on your {account_link} page.",
-				'wc-simple-store-credit'
-			),
-		);
-		$saved = get_option( 'wcsc_email_template', array() );
+	public function get_email_template( $which = 'gift' ) {
+		if ( 'promo' === $which ) {
+			$defaults = array(
+				'subject' => __( '🎉 You won {amount} in store credit at {store_name}!', 'wc-simple-store-credit' ),
+				'heading' => __( 'You\'re a winner!', 'wc-simple-store-credit' ),
+				'body'    => __(
+					"Hi {first_name},\n\n{note}\n\nWe've added {amount} in store credit to your account — your balance is now {balance}.\n\nUse it on any order at checkout — now or whenever you like. You can view your balance any time on your {account_link} page.",
+					'wc-simple-store-credit'
+				),
+			);
+			$saved = get_option( 'wcsc_promo_email_template', array() );
+		} else {
+			$defaults = array(
+				'subject' => __( 'You\'ve received {amount} in store credit at {store_name}', 'wc-simple-store-credit' ),
+				'heading' => __( 'You\'ve got store credit!', 'wc-simple-store-credit' ),
+				'body'    => __(
+					"Hi {first_name},\n\nWe've added {amount} in store credit to your account.\n\n{note}\n\nYour balance is now {balance}.\n\nUse it on any order at checkout — now or whenever you like. You can view your balance any time on your {account_link} page.",
+					'wc-simple-store-credit'
+				),
+			);
+			$saved = get_option( 'wcsc_email_template', array() );
+		}
 		return wp_parse_args( is_array( $saved ) ? $saved : array(), $defaults );
 	}
 
@@ -787,9 +827,9 @@ class WC_Simple_Store_Credit {
 	 * Notify the customer they've been gifted credit, wrapped in the store's
 	 * standard WooCommerce email template.
 	 */
-	private function send_gift_email( $user, $amount, $note, $new_balance ) {
+	private function send_gift_email( $user, $amount, $note, $new_balance, $which = 'gift' ) {
 		$mailer     = WC()->mailer();
-		$template   = $this->get_email_template();
+		$template   = $this->get_email_template( $which );
 		$store_name = wp_specialchars_decode( get_option( 'blogname' ), ENT_QUOTES );
 		$first_name = $user->first_name ? $user->first_name : $user->display_name;
 
@@ -1192,7 +1232,7 @@ class WC_Simple_Store_Credit {
 		$new  = $this->adjust_balance( $user_id, $amount, $note );
 
 		$user    = get_userdata( $user_id );
-		$emailed = $user ? $this->send_gift_email( $user, $amount, $note, $new ) : false;
+		$emailed = $user ? $this->send_gift_email( $user, $amount, $note, $new, 'promo' ) : false;
 
 		$promo['winners'][ $index ]['sent']    = true;
 		$promo['winners'][ $index ]['amount']  = $amount;
