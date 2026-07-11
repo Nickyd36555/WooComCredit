@@ -1241,6 +1241,22 @@ class WC_Simple_Store_Credit {
 
 		update_option( 'wcsc_promo_spent', round( $this->get_promo_spent() + $amount, wc_get_price_decimals() ) );
 
+		// Permanent winners log (kept even when the daily lineup is re-picked
+		// or the budget counter is reset).
+		$history = get_option( 'wcsc_promo_history', array() );
+		if ( ! is_array( $history ) ) {
+			$history = array();
+		}
+		$history[] = array(
+			'time'    => time(),
+			'name'    => $row['name'],
+			'email'   => $row['email'],
+			'user_id' => (int) $user_id,
+			'amount'  => $amount,
+			'order'   => $row['number'],
+		);
+		update_option( 'wcsc_promo_history', array_slice( $history, -500 ) );
+
 		$message = sprintf(
 			/* translators: 1: credit amount, 2: winner name, 3: winner email */
 			__( 'Sent %1$s store credit to %2$s (%3$s).', 'wc-simple-store-credit' ),
@@ -1327,6 +1343,7 @@ class WC_Simple_Store_Credit {
 		</form>
 		<?php
 		if ( ! is_array( $promo ) || empty( $promo['winners'] ) ) {
+			$this->render_promo_history();
 			return;
 		}
 		?>
@@ -1378,6 +1395,63 @@ class WC_Simple_Store_Credit {
 			</tbody>
 		</table>
 		<?php
+		$this->render_promo_history();
+	}
+
+	private function render_promo_history() {
+		$history = get_option( 'wcsc_promo_history', array() );
+		if ( ! is_array( $history ) || empty( $history ) ) {
+			return;
+		}
+
+		$all_time = 0;
+		foreach ( $history as $entry ) {
+			$all_time += (float) $entry['amount'];
+		}
+		$recent = array_slice( array_reverse( $history ), 0, 50 );
+		?>
+		<h3 style="margin-top:2em;">
+			<?php
+			printf(
+				/* translators: 1: number of winners, 2: total credit given */
+				esc_html__( 'All winners so far — %1$d win(s), %2$s given away in total', 'wc-simple-store-credit' ),
+				count( $history ),
+				wp_kses_post( wc_price( $all_time ) )
+			);
+			?>
+		</h3>
+		<table class="widefat striped" style="max-width:900px;">
+			<thead>
+				<tr>
+					<th><?php esc_html_e( 'Date', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Winner', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Email', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Order', 'wc-simple-store-credit' ); ?></th>
+					<th><?php esc_html_e( 'Credit sent', 'wc-simple-store-credit' ); ?></th>
+				</tr>
+			</thead>
+			<tbody>
+				<?php foreach ( $recent as $entry ) : ?>
+					<tr>
+						<td><?php echo esc_html( wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $entry['time'] ) ); ?></td>
+						<td>
+							<?php if ( ! empty( $entry['user_id'] ) && get_userdata( $entry['user_id'] ) ) : ?>
+								<a href="<?php echo esc_url( get_edit_user_link( $entry['user_id'] ) ); ?>"><?php echo esc_html( $entry['name'] ? $entry['name'] : '—' ); ?></a>
+							<?php else : ?>
+								<?php echo esc_html( $entry['name'] ? $entry['name'] : '—' ); ?>
+							<?php endif; ?>
+						</td>
+						<td><?php echo esc_html( $entry['email'] ); ?></td>
+						<td>#<?php echo esc_html( $entry['order'] ); ?></td>
+						<td><?php echo wp_kses_post( wc_price( $entry['amount'] ) ); ?></td>
+					</tr>
+				<?php endforeach; ?>
+			</tbody>
+		</table>
+		<?php
+		if ( count( $history ) > 50 ) {
+			echo '<p class="description">' . esc_html__( 'Showing the 50 most recent wins. The log keeps the last 500.', 'wc-simple-store-credit' ) . '</p>';
+		}
 	}
 
 	private function admin_balances_table() {
