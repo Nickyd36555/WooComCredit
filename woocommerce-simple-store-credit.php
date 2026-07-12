@@ -63,6 +63,8 @@ class WC_Simple_Store_Credit {
 		// Admin.
 		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
 		add_filter( 'woocommerce_screen_ids', array( $this, 'admin_screen_ids' ) );
+		add_action( 'add_meta_boxes', array( $this, 'add_order_meta_box' ) );
+		add_action( 'wp_ajax_wcsc_order_credit', array( $this, 'ajax_order_credit' ) );
 	}
 
 	/* -------------------------------------------------------------------------
@@ -1026,6 +1028,187 @@ class WC_Simple_Store_Credit {
 		$created = true;
 
 		return (int) $user_id;
+	}
+
+	/* -------------------------------------------------------------------------
+	 * Order edit screen: Store credit meta box
+	 * ---------------------------------------------------------------------- */
+
+	public function add_order_meta_box() {
+		$screen = function_exists( 'wc_get_page_screen_id' ) ? wc_get_page_screen_id( 'shop-order' ) : 'shop_order';
+		add_meta_box(
+			'wcsc-order-credit',
+			__( 'Store Credit', 'wc-simple-store-credit' ),
+			array( $this, 'render_order_meta_box' ),
+			$screen,
+			'side'
+		);
+	}
+
+	public function render_order_meta_box( $post_or_order ) {
+		$order = $post_or_order instanceof WC_Order ? $post_or_order : wc_get_order( $post_or_order->ID );
+		if ( ! $order ) {
+			return;
+		}
+		$user_id = $order->get_user_id();
+		$nonce   = wp_create_nonce( 'wcsc_order_credit' );
+
+		if ( ! $user_id ) {
+			?>
+			<p><?php esc_html_e( 'This is a guest order — the customer needs an account to hold store credit.', 'wc-simple-store-credit' ); ?></p>
+			<button type="button" class="button button-primary" id="wcsc-order-create-account"><?php esc_html_e( 'Create account from this order', 'wc-simple-store-credit' ); ?></button>
+			<div id="wcsc-order-credit-msg" style="margin-top:.5em;"></div>
+			<script>
+			jQuery( function( $ ) {
+				$( '#wcsc-order-create-account' ).on( 'click', function() {
+					var $btn = $( this ).prop( 'disabled', true );
+					$.post( ajaxurl, {
+						action: 'wcsc_order_credit',
+						_wpnonce: '<?php echo esc_js( $nonce ); ?>',
+						order_id: <?php echo (int) $order->get_id(); ?>,
+						op: 'create_account'
+					}, function( resp ) {
+						if ( resp && resp.success ) {
+							location.reload();
+						} else {
+							$btn.prop( 'disabled', false );
+							$( '#wcsc-order-credit-msg' ).css( 'color', '#c0392b' ).html( resp && resp.data && resp.data.message ? resp.data.message : '<?php echo esc_js( __( 'Something went wrong.', 'wc-simple-store-credit' ) ); ?>' );
+						}
+					} );
+				} );
+			} );
+			</script>
+			<?php
+			return;
+		}
+
+		$balance = $this->get_balance( $user_id );
+		?>
+		<p style="margin-bottom:.75em;">
+			<?php esc_html_e( 'Current balance:', 'wc-simple-store-credit' ); ?>
+			<strong id="wcsc-order-balance" style="font-size:1.3em;"><?php echo wp_kses_post( wc_price( $balance ) ); ?></strong>
+		</p>
+		<p style="margin:.25em 0;">
+			<select id="wcsc-order-op" style="width:38%;">
+				<option value="add"><?php esc_html_e( 'Add', 'wc-simple-store-credit' ); ?></option>
+				<option value="deduct"><?php esc_html_e( 'Deduct', 'wc-simple-store-credit' ); ?></option>
+			</select>
+			<input type="number" step="0.01" min="0.01" id="wcsc-order-amount" style="width:58%;" placeholder="<?php esc_attr_e( 'Amount', 'wc-simple-store-credit' ); ?>" />
+		</p>
+		<p style="margin:.25em 0;">
+			<input type="text" id="wcsc-order-note" style="width:100%;" placeholder="<?php esc_attr_e( 'Note (shown to customer)', 'wc-simple-store-credit' ); ?>" />
+		</p>
+		<p style="margin:.25em 0;">
+			<label><input type="checkbox" id="wcsc-order-notify" checked /> <?php esc_html_e( 'Email customer (when adding)', 'wc-simple-store-credit' ); ?></label>
+		</p>
+		<button type="button" class="button button-primary" id="wcsc-order-credit-btn"><?php esc_html_e( 'Update credit', 'wc-simple-store-credit' ); ?></button>
+		<div id="wcsc-order-credit-msg" style="margin-top:.5em;"></div>
+		<script>
+		jQuery( function( $ ) {
+			$( '#wcsc-order-credit-btn' ).on( 'click', function() {
+				var $btn = $( this ).prop( 'disabled', true );
+				$.post( ajaxurl, {
+					action: 'wcsc_order_credit',
+					_wpnonce: '<?php echo esc_js( $nonce ); ?>',
+					order_id: <?php echo (int) $order->get_id(); ?>,
+					op: $( '#wcsc-order-op' ).val(),
+					amount: $( '#wcsc-order-amount' ).val(),
+					note: $( '#wcsc-order-note' ).val(),
+					notify: $( '#wcsc-order-notify' ).is( ':checked' ) ? 1 : 0
+				}, function( resp ) {
+					$btn.prop( 'disabled', false );
+					var $msg = $( '#wcsc-order-credit-msg' );
+					if ( resp && resp.success ) {
+						$( '#wcsc-order-balance' ).html( resp.data.balance_html );
+						$msg.css( 'color', '#1a7f37' ).html( resp.data.message );
+						$( '#wcsc-order-amount' ).val( '' );
+						$( '#wcsc-order-note' ).val( '' );
+					} else {
+						$msg.css( 'color', '#c0392b' ).html( resp && resp.data && resp.data.message ? resp.data.message : '<?php echo esc_js( __( 'Something went wrong.', 'wc-simple-store-credit' ) ); ?>' );
+					}
+				} );
+			} );
+		} );
+		</script>
+		<?php
+	}
+
+	public function ajax_order_credit() {
+		check_ajax_referer( 'wcsc_order_credit' );
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_send_json_error( array( 'message' => __( 'You don\'t have permission to do that.', 'wc-simple-store-credit' ) ) );
+		}
+
+		$order = wc_get_order( isset( $_POST['order_id'] ) ? absint( $_POST['order_id'] ) : 0 );
+		if ( ! $order ) {
+			wp_send_json_error( array( 'message' => __( 'Order not found.', 'wc-simple-store-credit' ) ) );
+		}
+
+		$op = isset( $_POST['op'] ) ? sanitize_key( $_POST['op'] ) : '';
+
+		if ( 'create_account' === $op ) {
+			if ( $order->get_user_id() ) {
+				wp_send_json_error( array( 'message' => __( 'This order already belongs to an account.', 'wc-simple-store-credit' ) ) );
+			}
+			$user_id = $this->get_or_create_customer_for_order( $order );
+			if ( is_wp_error( $user_id ) ) {
+				wp_send_json_error( array( 'message' => $user_id->get_error_message() ) );
+			}
+			$order->add_order_note( __( 'Customer account created from this order via the Store Credit box.', 'wc-simple-store-credit' ) );
+			wp_send_json_success();
+		}
+
+		$user_id = $order->get_user_id();
+		if ( ! $user_id ) {
+			wp_send_json_error( array( 'message' => __( 'This is a guest order — create an account for the customer first.', 'wc-simple-store-credit' ) ) );
+		}
+
+		$amount = isset( $_POST['amount'] ) ? (float) wc_format_decimal( wp_unslash( $_POST['amount'] ) ) : 0;
+		if ( $amount <= 0 ) {
+			wp_send_json_error( array( 'message' => __( 'Please enter an amount greater than zero.', 'wc-simple-store-credit' ) ) );
+		}
+
+		$deduct = 'deduct' === $op;
+		$note   = isset( $_POST['note'] ) ? sanitize_text_field( wp_unslash( $_POST['note'] ) ) : '';
+		if ( '' === $note ) {
+			$note = $deduct
+				? __( 'Credit adjusted by the store', 'wc-simple-store-credit' )
+				: __( 'Credit gifted by the store', 'wc-simple-store-credit' );
+		}
+
+		$new = $this->adjust_balance( $user_id, $deduct ? -$amount : $amount, $note );
+
+		$emailed = false;
+		if ( ! $deduct && ! empty( $_POST['notify'] ) ) {
+			$user    = get_userdata( $user_id );
+			$emailed = $user ? $this->send_gift_email( $user, $amount, $note, $new ) : false;
+		}
+
+		$order->add_order_note(
+			sprintf(
+				/* translators: 1: Added/Deducted, 2: amount, 3: new balance */
+				__( '%1$s %2$s store credit via the order screen (balance now %3$s).', 'wc-simple-store-credit' ),
+				$deduct ? __( 'Deducted', 'wc-simple-store-credit' ) : __( 'Added', 'wc-simple-store-credit' ),
+				html_entity_decode( wp_strip_all_tags( wc_price( $amount ) ), ENT_QUOTES, 'UTF-8' ),
+				html_entity_decode( wp_strip_all_tags( wc_price( $new ) ), ENT_QUOTES, 'UTF-8' )
+			)
+		);
+
+		$message = $deduct
+			? sprintf( /* translators: %s: amount */ __( 'Deducted %s.', 'wc-simple-store-credit' ), wc_price( $amount ) )
+			: sprintf( /* translators: %s: amount */ __( 'Added %s.', 'wc-simple-store-credit' ), wc_price( $amount ) );
+		if ( $emailed ) {
+			$message .= ' ' . __( 'Customer emailed.', 'wc-simple-store-credit' );
+		} elseif ( ! $deduct && ! empty( $_POST['notify'] ) ) {
+			$message .= ' ' . __( 'Email could not be sent.', 'wc-simple-store-credit' );
+		}
+
+		wp_send_json_success(
+			array(
+				'balance_html' => wc_price( $new ),
+				'message'      => $message,
+			)
+		);
 	}
 
 	/* -------------------------------------------------------------------------
