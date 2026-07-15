@@ -20,10 +20,11 @@ it to any order at checkout — right away or whenever they feel like it.
   template with the amount, your note, their new balance, and a link to
   their Store Credit page.
 - **Redeem at checkout** — customers tick "Use my store credit" at checkout
-  (or use the Apply link on the cart page). The credit is added as a discount
-  line on the order and can cover the entire order — items, shipping, taxes,
+  (or use the Apply link on the cart page). The credit is deducted from the
+  final order total and can cover the entire order — items, shipping, taxes,
   and other charges — capped at the order cost so the total never goes
-  negative.
+  negative. A "Store credit −$x" row appears in the cart/checkout totals and
+  on order confirmations and emails.
 - **Automatic bookkeeping** — credit is deducted when the order is placed and
   automatically returned to the customer if the order is cancelled, fails, or
   is fully refunded.

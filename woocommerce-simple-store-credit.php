@@ -15,10 +15,11 @@ defined( 'ABSPATH' ) || exit;
 
 class WC_Simple_Store_Credit {
 
-	const META_BALANCE = '_wcsc_credit_balance';
-	const META_LOG     = '_wcsc_credit_log';
-	const ENDPOINT     = 'store-credit';
-	const SESSION_KEY  = 'wcsc_apply_credit';
+	const META_BALANCE    = '_wcsc_credit_balance';
+	const META_LOG        = '_wcsc_credit_log';
+	const ENDPOINT        = 'store-credit';
+	const SESSION_KEY     = 'wcsc_apply_credit';
+	const SESSION_AMOUNT  = 'wcsc_applied_amount';
 
 	/** @var WC_Simple_Store_Credit */
 	private static $instance;
@@ -47,9 +48,16 @@ class WC_Simple_Store_Credit {
 		add_action( 'woocommerce_review_order_before_order_total', array( $this, 'review_order_credit_row' ) );
 		add_filter( 'woocommerce_form_field_checkbox', array( $this, 'strip_optional_suffix' ), 10, 2 );
 		add_action( 'woocommerce_checkout_update_order_review', array( $this, 'checkout_update_session' ) );
-		// Late priority so other plugins' fees (e.g. package protection) are
-		// already in the cart and get covered by the credit too.
-		add_action( 'woocommerce_cart_calculate_fees', array( $this, 'apply_credit_fee' ), 999 );
+		// Apply the credit against the final calculated total (after items,
+		// shipping, fees, and taxes) so it can cover the whole order.
+		// WooCommerce caps negative fees at the pre-tax amount, so a fee-based
+		// discount could never cover taxes.
+		add_filter( 'woocommerce_calculated_total', array( $this, 'apply_credit_to_total' ), 999, 2 );
+		add_action( 'woocommerce_cart_totals_before_order_total', array( $this, 'render_totals_row' ) );
+		add_action( 'woocommerce_review_order_before_order_total', array( $this, 'render_totals_row' ), 20 );
+		add_filter( 'woocommerce_get_order_item_totals', array( $this, 'order_totals_row' ), 10, 2 );
+		add_action( 'woocommerce_checkout_create_order', array( $this, 'record_credit_on_order' ) );
+		add_action( 'woocommerce_store_api_checkout_update_order_from_request', array( $this, 'record_credit_on_order' ) );
 		add_action( 'woocommerce_after_checkout_validation', array( $this, 'validate_credit_at_checkout' ), 10, 2 );
 
 		// Deduct credit when the order is placed; restore it if the order dies.
@@ -107,10 +115,6 @@ class WC_Simple_Store_Credit {
 		return is_array( $log ) ? array_reverse( $log ) : array();
 	}
 
-	private function fee_name() {
-		return __( 'Store credit', 'wc-simple-store-credit' );
-	}
-
 	private function is_credit_applied() {
 		return WC()->session && 'yes' === WC()->session->get( self::SESSION_KEY );
 	}
@@ -118,6 +122,9 @@ class WC_Simple_Store_Credit {
 	private function set_credit_applied( $applied ) {
 		if ( WC()->session ) {
 			WC()->session->set( self::SESSION_KEY, $applied ? 'yes' : 'no' );
+			if ( ! $applied ) {
+				WC()->session->set( self::SESSION_AMOUNT, 0 );
+			}
 		}
 	}
 
@@ -323,33 +330,78 @@ class WC_Simple_Store_Credit {
 		$this->set_credit_applied( ! empty( $data['wcsc_apply_credit'] ) );
 	}
 
-	public function apply_credit_fee( $cart ) {
-		if ( is_admin() && ! defined( 'DOING_AJAX' ) ) {
-			return;
-		}
-		if ( ! is_user_logged_in() || ! $this->is_credit_applied() ) {
-			return;
+	/**
+	 * Deduct the credit from the fully calculated cart total (items +
+	 * shipping + fees + taxes), capped at that total so it never goes
+	 * negative. The applied amount is kept in the session for display,
+	 * validation, and recording on the order.
+	 */
+	public function apply_credit_to_total( $total, $cart ) {
+		if ( ! is_user_logged_in() || ! WC()->session || ! $this->is_credit_applied() ) {
+			return $total;
 		}
 		$balance = $this->get_balance( get_current_user_id() );
-		if ( $balance <= 0 ) {
+		$credit  = round( min( $balance, max( 0, (float) $total ) ), wc_get_price_decimals() );
+
+		WC()->session->set( self::SESSION_AMOUNT, $credit );
+
+		return $credit > 0 ? (float) $total - $credit : $total;
+	}
+
+	private function get_applied_credit() {
+		if ( ! WC()->session || ! $this->is_credit_applied() ) {
+			return 0;
+		}
+		return max( 0, (float) WC()->session->get( self::SESSION_AMOUNT ) );
+	}
+
+	/**
+	 * "Store credit −$x" row in the cart/checkout totals tables.
+	 */
+	public function render_totals_row() {
+		$applied = $this->get_applied_credit();
+		if ( $applied <= 0 ) {
 			return;
 		}
+		?>
+		<tr class="wcsc-credit-total">
+			<th><?php esc_html_e( 'Store credit', 'wc-simple-store-credit' ); ?></th>
+			<td data-title="<?php esc_attr_e( 'Store credit', 'wc-simple-store-credit' ); ?>">−<?php echo wp_kses_post( wc_price( $applied ) ); ?></td>
+		</tr>
+		<?php
+	}
 
-		// Cap the credit at the full order cost — items, shipping, and any
-		// other charges (all incl. tax) — so it can never push the total
-		// negative but can cover the whole order.
-		$cap = (float) $cart->get_cart_contents_total() + (float) $cart->get_cart_contents_tax();
-		$cap += (float) $cart->get_shipping_total() + (float) $cart->get_shipping_tax();
-		foreach ( $cart->get_fees() as $fee ) {
-			if ( $fee->name !== $this->fee_name() && (float) $fee->amount > 0 ) {
-				$cap += (float) $fee->amount + (float) $fee->tax;
-			}
+	/**
+	 * Stamp the applied credit onto the order as it's created, so the
+	 * deduction and the customer-facing totals row read from the order
+	 * itself afterwards.
+	 */
+	public function record_credit_on_order( $order ) {
+		$applied = $this->get_applied_credit();
+		if ( $applied > 0 && $order instanceof WC_Order ) {
+			$order->update_meta_data( '_wcsc_credit_used', wc_format_decimal( $applied ) );
 		}
-		$credit = min( $balance, max( 0, $cap ) );
+	}
 
-		if ( $credit > 0 ) {
-			$cart->add_fee( $this->fee_name(), -$credit, false );
+	/**
+	 * "Store credit: −$x" row on order confirmation pages and emails.
+	 */
+	public function order_totals_row( $rows, $order ) {
+		$used = (float) $order->get_meta( '_wcsc_credit_used' );
+		if ( $used <= 0 ) {
+			return $rows;
 		}
+		$row = array(
+			'wcsc_credit' => array(
+				'label' => __( 'Store credit:', 'wc-simple-store-credit' ),
+				'value' => '−' . wc_price( $used, array( 'currency' => $order->get_currency() ) ),
+			),
+		);
+		$pos = array_search( 'order_total', array_keys( $rows ), true );
+		if ( false !== $pos ) {
+			return array_slice( $rows, 0, $pos, true ) + $row + array_slice( $rows, $pos, null, true );
+		}
+		return $rows + $row;
 	}
 
 	/**
@@ -358,7 +410,7 @@ class WC_Simple_Store_Credit {
 	 * second browser tab) can't spend credit that no longer exists.
 	 */
 	public function validate_credit_at_checkout( $data, $errors ) {
-		$applied = $this->get_cart_credit_total();
+		$applied = $this->get_applied_credit();
 		if ( $applied <= 0 ) {
 			return;
 		}
@@ -372,19 +424,6 @@ class WC_Simple_Store_Credit {
 		}
 	}
 
-	private function get_cart_credit_total() {
-		if ( ! WC()->cart ) {
-			return 0;
-		}
-		$total = 0;
-		foreach ( WC()->cart->get_fees() as $fee ) {
-			if ( $fee->name === $this->fee_name() && $fee->amount < 0 ) {
-				$total += abs( (float) $fee->amount + (float) $fee->tax );
-			}
-		}
-		return $total;
-	}
-
 	/* -------------------------------------------------------------------------
 	 * Order lifecycle
 	 * ---------------------------------------------------------------------- */
@@ -393,7 +432,7 @@ class WC_Simple_Store_Credit {
 		if ( ! $order instanceof WC_Order ) {
 			$order = wc_get_order( $order );
 		}
-		if ( ! $order || $order->get_meta( '_wcsc_credit_used' ) ) {
+		if ( ! $order || $order->get_meta( '_wcsc_credit_deducted' ) ) {
 			return;
 		}
 		$user_id = $order->get_user_id();
@@ -401,12 +440,7 @@ class WC_Simple_Store_Credit {
 			return;
 		}
 
-		$used = 0;
-		foreach ( $order->get_fees() as $fee ) {
-			if ( $fee->get_name() === $this->fee_name() && (float) $fee->get_total() < 0 ) {
-				$used += abs( (float) $fee->get_total() + (float) $fee->get_total_tax() );
-			}
-		}
+		$used = (float) $order->get_meta( '_wcsc_credit_used' );
 		if ( $used <= 0 ) {
 			return;
 		}
@@ -430,6 +464,14 @@ class WC_Simple_Store_Credit {
 		}
 
 		$order->update_meta_data( '_wcsc_credit_used', wc_format_decimal( $deduct ) );
+		$order->update_meta_data( '_wcsc_credit_deducted', 'yes' );
+		$order->add_order_note(
+			sprintf(
+				/* translators: %s: credit amount */
+				__( 'Customer redeemed %s store credit on this order.', 'wc-simple-store-credit' ),
+				html_entity_decode( wp_strip_all_tags( wc_price( $deduct ) ), ENT_QUOTES, 'UTF-8' )
+			)
+		);
 
 		if ( $overspend ) {
 			$order->update_meta_data( '_wcsc_credit_hold', 'yes' );
