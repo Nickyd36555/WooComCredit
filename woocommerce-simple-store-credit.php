@@ -2,8 +2,9 @@
 /**
  * Plugin Name: Simple Store Credit for WooCommerce
  * Description: Gift store credit to customers. Customers see their balance under My Account → Store Credit and can apply it at checkout whenever they like.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: WooComCredit
+ * Update URI: https://github.com/Nickyd36555/WooComCredit
  * Text Domain: wc-simple-store-credit
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -1791,9 +1792,170 @@ class WC_Simple_Store_Credit {
 	}
 }
 
+/**
+ * Self-hosted updater: makes WordPress show an "update available" notice for
+ * this plugin (and lets you click Update on the Plugins page) by checking the
+ * public GitHub repo for a newer version tag. No tokens needed — the repo is
+ * public. Bump the plugin header Version and push a matching git tag (e.g.
+ * v1.1.1) to publish an update.
+ */
+class WCSC_GitHub_Updater {
+
+	const OWNER     = 'Nickyd36555';
+	const REPO      = 'WooComCredit';
+	const CACHE_KEY = 'wcsc_update_check';
+	const CACHE_TTL = 6 * HOUR_IN_SECONDS;
+
+	private $file;
+	private $basename;
+	private $slug;
+	private $version;
+
+	public function __construct( $file ) {
+		$this->file     = $file;
+		$this->basename = plugin_basename( $file );      // e.g. woocommerce-simple-store-credit/woocommerce-simple-store-credit.php
+		$this->slug     = dirname( $this->basename );    // e.g. woocommerce-simple-store-credit
+		$data           = get_file_data( $file, array( 'Version' => 'Version' ) );
+		$this->version  = $data['Version'];
+
+		add_filter( 'pre_set_site_transient_update_plugins', array( $this, 'inject_update' ) );
+		add_filter( 'plugins_api', array( $this, 'plugin_details' ), 10, 3 );
+		add_filter( 'upgrader_source_selection', array( $this, 'fix_source_dir' ), 10, 4 );
+		add_action( 'upgrader_process_complete', array( $this, 'flush_cache' ), 10, 0 );
+	}
+
+	/**
+	 * Highest version tag on GitHub and its downloadable zip, cached.
+	 *
+	 * @return array{version:string,zip:string,notes:string}|null
+	 */
+	private function get_remote() {
+		$cached = get_transient( self::CACHE_KEY );
+		if ( is_array( $cached ) ) {
+			return $cached;
+		}
+
+		$response = wp_remote_get(
+			sprintf( 'https://api.github.com/repos/%s/%s/tags?per_page=100', self::OWNER, self::REPO ),
+			array(
+				'timeout' => 15,
+				'headers' => array(
+					'Accept'     => 'application/vnd.github+json',
+					'User-Agent' => self::OWNER . '-' . self::REPO,
+				),
+			)
+		);
+		if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
+			set_transient( self::CACHE_KEY, array(), 30 * MINUTE_IN_SECONDS ); // brief negative cache
+			return null;
+		}
+
+		$tags = json_decode( wp_remote_retrieve_body( $response ), true );
+		if ( ! is_array( $tags ) || empty( $tags ) ) {
+			set_transient( self::CACHE_KEY, array(), 30 * MINUTE_IN_SECONDS );
+			return null;
+		}
+
+		$best    = null;
+		$best_v  = '0.0.0';
+		foreach ( $tags as $tag ) {
+			$name = isset( $tag['name'] ) ? ltrim( $tag['name'], 'vV' ) : '';
+			if ( $name && version_compare( $name, $best_v, '>' ) ) {
+				$best_v = $name;
+				$best   = $tag;
+			}
+		}
+		if ( ! $best ) {
+			set_transient( self::CACHE_KEY, array(), 30 * MINUTE_IN_SECONDS );
+			return null;
+		}
+
+		$info = array(
+			'version' => $best_v,
+			'zip'     => isset( $best['zipball_url'] ) ? $best['zipball_url'] : '',
+			'notes'   => '',
+		);
+		set_transient( self::CACHE_KEY, $info, self::CACHE_TTL );
+		return $info;
+	}
+
+	public function inject_update( $transient ) {
+		if ( ! is_object( $transient ) || empty( $transient->checked ) ) {
+			return $transient;
+		}
+		$remote = $this->get_remote();
+		if ( ! $remote || empty( $remote['zip'] ) || version_compare( $remote['version'], $this->version, '<=' ) ) {
+			return $transient;
+		}
+		$transient->response[ $this->basename ] = (object) array(
+			'slug'        => $this->slug,
+			'plugin'      => $this->basename,
+			'new_version' => $remote['version'],
+			'url'         => sprintf( 'https://github.com/%s/%s', self::OWNER, self::REPO ),
+			'package'     => $remote['zip'],
+		);
+		return $transient;
+	}
+
+	public function plugin_details( $result, $action, $args ) {
+		if ( 'plugin_information' !== $action || empty( $args->slug ) || $args->slug !== $this->slug ) {
+			return $result;
+		}
+		$remote = $this->get_remote();
+		if ( ! $remote ) {
+			return $result;
+		}
+		return (object) array(
+			'name'          => 'Simple Store Credit for WooCommerce',
+			'slug'          => $this->slug,
+			'version'       => $remote['version'],
+			'author'        => '<a href="https://github.com/' . self::OWNER . '">' . self::OWNER . '</a>',
+			'homepage'      => sprintf( 'https://github.com/%s/%s', self::OWNER, self::REPO ),
+			'download_link' => $remote['zip'],
+			'sections'      => array(
+				'description' => __( 'Gift store credit to customers, redeemable at checkout. Updates are delivered from the plugin\'s GitHub repository.', 'wc-simple-store-credit' ),
+				'changelog'   => sprintf(
+					/* translators: %s: releases URL */
+					__( 'See the full history at %s', 'wc-simple-store-credit' ),
+					sprintf( '<a href="https://github.com/%1$s/%2$s/commits/%3$s">github.com/%1$s/%2$s</a>', self::OWNER, self::REPO, 'v' . $remote['version'] )
+				),
+			),
+		);
+	}
+
+	/**
+	 * GitHub zipballs extract to a folder like "Owner-Repo-<sha>". Rename it to
+	 * the plugin's real slug so the plugin stays at the same path and active.
+	 */
+	public function fix_source_dir( $source, $remote_source, $upgrader, $hook_extra = array() ) {
+		if ( empty( $hook_extra['plugin'] ) || $hook_extra['plugin'] !== $this->basename ) {
+			return $source;
+		}
+		global $wp_filesystem;
+		$desired = trailingslashit( $remote_source ) . $this->slug;
+		if ( untrailingslashit( $source ) === $desired ) {
+			return $source;
+		}
+		if ( $wp_filesystem && $wp_filesystem->move( untrailingslashit( $source ), $desired, true ) ) {
+			return trailingslashit( $desired );
+		}
+		return $source;
+	}
+
+	public function flush_cache() {
+		delete_transient( self::CACHE_KEY );
+	}
+}
+
 /* ---------------------------------------------------------------------------
  * Bootstrap
  * ------------------------------------------------------------------------ */
+
+// Auto-updates from GitHub — runs in the admin regardless of WooCommerce so
+// the update notice always appears.
+if ( is_admin() ) {
+	new WCSC_GitHub_Updater( __FILE__ );
+}
 
 add_action(
 	'plugins_loaded',

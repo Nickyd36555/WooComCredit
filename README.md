@@ -34,6 +34,17 @@ it to any order at checkout — right away or whenever they feel like it.
   is fully refunded.
 - HPOS (High-Performance Order Storage) compatible.
 
+## Automatic updates
+
+Once installed, the plugin checks its public GitHub repository for new versions
+and shows a normal **update available** notice on your **Plugins** screen —
+click **Update** like any other plugin. No tokens or configuration required.
+
+To publish a new version: bump the `Version:` header in the main plugin file,
+push it, and create a matching git tag (e.g. `v1.1.1`). Sites see the update
+within a few hours (WordPress caches update checks); visiting
+**Dashboard → Updates** and clicking **Check again** forces an immediate check.
+
 ## Installation
 
 1. Copy the `woocommerce-simple-store-credit.php` file into
