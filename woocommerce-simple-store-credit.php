@@ -1803,6 +1803,8 @@ class WCSC_GitHub_Updater {
 
 	const OWNER     = 'Nickyd36555';
 	const REPO      = 'WooComCredit';
+	const BRANCH    = 'claude/woocommerce-store-credit-1l8uca';
+	const MAINFILE  = 'woocommerce-simple-store-credit.php';
 	const CACHE_KEY = 'wcsc_update_check';
 	const CACHE_TTL = 6 * HOUR_IN_SECONDS;
 
@@ -1825,9 +1827,10 @@ class WCSC_GitHub_Updater {
 	}
 
 	/**
-	 * Highest version tag on GitHub and its downloadable zip, cached.
+	 * Version declared in the plugin's main file on the GitHub branch, plus
+	 * the branch zip to install. Cached to respect GitHub's rate limits.
 	 *
-	 * @return array{version:string,zip:string,notes:string}|null
+	 * @return array{version:string,zip:string}|null
 	 */
 	private function get_remote() {
 		$cached = get_transient( self::CACHE_KEY );
@@ -1835,12 +1838,20 @@ class WCSC_GitHub_Updater {
 			return $cached;
 		}
 
+		// Read the main plugin file from the branch via the contents API
+		// (handles the slash in the branch name cleanly via the ref param).
 		$response = wp_remote_get(
-			sprintf( 'https://api.github.com/repos/%s/%s/tags?per_page=100', self::OWNER, self::REPO ),
+			sprintf(
+				'https://api.github.com/repos/%s/%s/contents/%s?ref=%s',
+				self::OWNER,
+				self::REPO,
+				rawurlencode( self::MAINFILE ),
+				rawurlencode( self::BRANCH )
+			),
 			array(
 				'timeout' => 15,
 				'headers' => array(
-					'Accept'     => 'application/vnd.github+json',
+					'Accept'     => 'application/vnd.github.raw',
 					'User-Agent' => self::OWNER . '-' . self::REPO,
 				),
 			)
@@ -1850,30 +1861,24 @@ class WCSC_GitHub_Updater {
 			return null;
 		}
 
-		$tags = json_decode( wp_remote_retrieve_body( $response ), true );
-		if ( ! is_array( $tags ) || empty( $tags ) ) {
-			set_transient( self::CACHE_KEY, array(), 30 * MINUTE_IN_SECONDS );
-			return null;
+		$body    = wp_remote_retrieve_body( $response );
+		$version = '';
+		if ( preg_match( '/^[ \t\/*#@]*Version:\s*(.+)$/mi', $body, $m ) ) {
+			$version = trim( $m[1] );
 		}
-
-		$best    = null;
-		$best_v  = '0.0.0';
-		foreach ( $tags as $tag ) {
-			$name = isset( $tag['name'] ) ? ltrim( $tag['name'], 'vV' ) : '';
-			if ( $name && version_compare( $name, $best_v, '>' ) ) {
-				$best_v = $name;
-				$best   = $tag;
-			}
-		}
-		if ( ! $best ) {
+		if ( ! $version ) {
 			set_transient( self::CACHE_KEY, array(), 30 * MINUTE_IN_SECONDS );
 			return null;
 		}
 
 		$info = array(
-			'version' => $best_v,
-			'zip'     => isset( $best['zipball_url'] ) ? $best['zipball_url'] : '',
-			'notes'   => '',
+			'version' => $version,
+			'zip'     => sprintf(
+				'https://api.github.com/repos/%s/%s/zipball/%s',
+				self::OWNER,
+				self::REPO,
+				self::BRANCH
+			),
 		);
 		set_transient( self::CACHE_KEY, $info, self::CACHE_TTL );
 		return $info;
@@ -1915,9 +1920,9 @@ class WCSC_GitHub_Updater {
 			'sections'      => array(
 				'description' => __( 'Gift store credit to customers, redeemable at checkout. Updates are delivered from the plugin\'s GitHub repository.', 'wc-simple-store-credit' ),
 				'changelog'   => sprintf(
-					/* translators: %s: releases URL */
+					/* translators: %s: commits URL */
 					__( 'See the full history at %s', 'wc-simple-store-credit' ),
-					sprintf( '<a href="https://github.com/%1$s/%2$s/commits/%3$s">github.com/%1$s/%2$s</a>', self::OWNER, self::REPO, 'v' . $remote['version'] )
+					sprintf( '<a href="https://github.com/%1$s/%2$s/commits/%3$s">github.com/%1$s/%2$s</a>', self::OWNER, self::REPO, self::BRANCH )
 				),
 			),
 		);
