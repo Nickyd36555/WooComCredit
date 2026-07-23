@@ -73,6 +73,12 @@ class WC_Simple_Store_Credit {
 		add_filter( 'woocommerce_screen_ids', array( $this, 'admin_screen_ids' ) );
 		add_action( 'add_meta_boxes', array( $this, 'add_order_meta_box' ) );
 		add_action( 'wp_ajax_wcsc_order_credit', array( $this, 'ajax_order_credit' ) );
+
+		// "Store credit" column in the Orders list (HPOS + classic screens).
+		add_filter( 'woocommerce_shop_order_list_table_columns', array( $this, 'orders_column' ) );
+		add_action( 'woocommerce_shop_order_list_table_custom_column', array( $this, 'orders_column_content' ), 10, 2 );
+		add_filter( 'manage_edit-shop_order_columns', array( $this, 'orders_column' ) );
+		add_action( 'manage_shop_order_posts_custom_column', array( $this, 'orders_column_content_classic' ), 10, 2 );
 	}
 
 	/* -------------------------------------------------------------------------
@@ -1076,6 +1082,55 @@ class WC_Simple_Store_Credit {
 	 * Order edit screen: Store credit meta box
 	 * ---------------------------------------------------------------------- */
 
+	/**
+	 * Insert a "Store credit" column just before the order total column.
+	 */
+	public function orders_column( $columns ) {
+		$new = array();
+		foreach ( $columns as $key => $label ) {
+			if ( 'order_total' === $key ) {
+				$new['wcsc_credit'] = __( 'Store credit', 'wc-simple-store-credit' );
+			}
+			$new[ $key ] = $label;
+		}
+		if ( ! isset( $new['wcsc_credit'] ) ) {
+			$new['wcsc_credit'] = __( 'Store credit', 'wc-simple-store-credit' );
+		}
+		return $new;
+	}
+
+	public function orders_column_content( $column, $order ) {
+		if ( 'wcsc_credit' !== $column ) {
+			return;
+		}
+		if ( ! $order instanceof WC_Order ) {
+			$order = wc_get_order( $order );
+		}
+		echo wp_kses_post( $this->orders_column_value( $order ) );
+	}
+
+	public function orders_column_content_classic( $column, $post_id ) {
+		if ( 'wcsc_credit' !== $column ) {
+			return;
+		}
+		echo wp_kses_post( $this->orders_column_value( wc_get_order( $post_id ) ) );
+	}
+
+	private function orders_column_value( $order ) {
+		if ( ! $order ) {
+			return '—';
+		}
+		$used = (float) $order->get_meta( '_wcsc_credit_used' );
+		if ( $used <= 0 ) {
+			return '<span style="color:#999;">—</span>';
+		}
+		$out = '<span style="color:#1a7f37;font-weight:600;">−' . wc_price( $used, array( 'currency' => $order->get_currency() ) ) . '</span>';
+		if ( $order->get_meta( '_wcsc_credit_restored' ) ) {
+			$out .= '<br /><small style="color:#999;">' . esc_html__( 'returned', 'wc-simple-store-credit' ) . '</small>';
+		}
+		return $out;
+	}
+
 	public function add_order_meta_box() {
 		$screen = function_exists( 'wc_get_page_screen_id' ) ? wc_get_page_screen_id( 'shop-order' ) : 'shop_order';
 		add_meta_box(
@@ -1094,6 +1149,20 @@ class WC_Simple_Store_Credit {
 		}
 		$user_id = $order->get_user_id();
 		$nonce   = wp_create_nonce( 'wcsc_order_credit' );
+
+		// How much store credit the customer redeemed on this order.
+		$used = (float) $order->get_meta( '_wcsc_credit_used' );
+		if ( $used > 0 ) {
+			?>
+			<p style="margin:0 0 .75em;padding:.5em .75em;background:#edfaef;border-left:4px solid #1a7f37;">
+				<?php esc_html_e( 'Store credit used on this order:', 'wc-simple-store-credit' ); ?>
+				<strong style="font-size:1.15em;">−<?php echo wp_kses_post( wc_price( $used, array( 'currency' => $order->get_currency() ) ) ); ?></strong>
+				<?php if ( $order->get_meta( '_wcsc_credit_restored' ) ) : ?>
+					<br /><small><em><?php esc_html_e( '(returned to the customer — order cancelled/refunded)', 'wc-simple-store-credit' ); ?></em></small>
+				<?php endif; ?>
+			</p>
+			<?php
+		}
 
 		if ( ! $user_id ) {
 			?>

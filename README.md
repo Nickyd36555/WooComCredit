@@ -25,6 +25,10 @@ it to any order at checkout — right away or whenever they feel like it.
   and other charges — capped at the order cost so the total never goes
   negative. A "Store credit −$x" row appears in the cart/checkout totals and
   on order confirmations and emails.
+- **See credit used on orders** — a "Store credit" column in the Orders list
+  shows how much credit was redeemed on each order, and the order edit screen
+  shows the amount redeemed at the top of its Store Credit box (flagged if the
+  order was cancelled/refunded and the credit returned).
 - **Automatic bookkeeping** — credit is deducted when the order is placed and
   automatically returned to the customer if the order is cancelled, fails, or
   is fully refunded.
